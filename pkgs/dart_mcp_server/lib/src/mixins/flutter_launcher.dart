@@ -97,6 +97,7 @@ base mixin FlutterLauncherSupport
           sdk.flutterExecutablePath,
           'run',
           '--print-dtd',
+          '--machine',
           '--device-id',
           device,
           if (target != null) '--target',
@@ -116,16 +117,29 @@ base mixin FlutterLauncherSupport
 
       late StreamSubscription stdoutSubscription;
       late StreamSubscription stderrSubscription;
-      final dtdUriRegex = RegExp(
-        r'The Dart Tooling Daemon is available at: (ws://.+:\d+/\S+=)',
-      );
 
       void checkForDtdUri(String line) {
-        final match = dtdUriRegex.firstMatch(line);
-        if (match != null && !completer.isCompleted) {
-          final dtdUri = Uri.parse(match.group(1)!);
-          log(LoggingLevel.debug, 'Found DTD URI: $dtdUri');
-          completer.complete((dtdUri: dtdUri, pid: process!.pid));
+        line = line.trim();
+        // Check for --machine output first.
+        if (line.startsWith('[') && line.endsWith(']')) {
+          // Looking for:
+          // [{"event":"app.dtd","params":{"appId":"cd6c66eb-35e9-4ac1-96df-727540138346","uri":"ws://127.0.0.1:59548/3OpAaPw9i34="}}]
+          try {
+            final json =
+                jsonDecode(line.substring(1, line.length - 1))
+                    as Map<String, Object?>;
+            if (json['event'] == 'app.dtd' && json['params'] != null) {
+              final params = json['params'] as Map<String, Object?>;
+              if (params['uri'] != null) {
+                final dtdUri = Uri.parse(params['uri'] as String);
+                log(LoggingLevel.debug, 'Found machine DTD URI: $dtdUri');
+                completer.complete((dtdUri: dtdUri, pid: process!.pid));
+              }
+            }
+          } on FormatException {
+            // Ignore failures to parse the JSON or the URI.
+            log(LoggingLevel.debug, 'Failed to parse $line for the DTD URI.');
+          }
         }
       }
 
@@ -213,7 +227,7 @@ base mixin FlutterLauncherSupport
     } catch (e, s) {
       log(LoggingLevel.error, 'Error launching Flutter application: $e\n$s');
       if (process != null) {
-        process.kill();
+        processManager.killPid(process.pid);
         // The exitCode handler will perform the rest of the cleanup.
       }
       return CallToolResult(
