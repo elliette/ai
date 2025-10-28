@@ -33,6 +33,20 @@ void main() {
       });
 
       group('flutter tests', () {
+        test('can make a sampling request', () async {
+          final dtdClient = testHarness.fakeEditorExtension.dtd;
+          final result = await dtdClient.call(
+            DartToolingDaemonSupport.kDartMcpServerService,
+            DartToolingDaemonSupport.kSamplingRequest,
+            params: {
+              'messages': ['hello world'],
+              'maxTokens': 123,
+            },
+          );
+          final response = result.result['value'] as String;
+          expect(response, 'You said: "hello world" and I have 123 tokens :)');
+        });
+
         test('can get the widget tree', () async {
           await testHarness.startDebugSession(
             counterAppPath,

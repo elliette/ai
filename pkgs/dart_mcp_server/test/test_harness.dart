@@ -289,7 +289,8 @@ final class AppDebugSession {
 }
 
 /// A basic MCP client which is started as a part of the harness.
-final class DartToolingMCPClient extends MCPClient with RootsSupport {
+final class DartToolingMCPClient extends MCPClient
+    with RootsSupport, SamplingSupport {
   DartToolingMCPClient()
     : super(
         Implementation(
@@ -297,6 +298,21 @@ final class DartToolingMCPClient extends MCPClient with RootsSupport {
           version: '0.1.0',
         ),
       );
+
+  @override
+  FutureOr<CreateMessageResult> handleCreateMessage(
+    CreateMessageRequest request,
+    Implementation serverInfo,
+  ) {
+    final messageText = (request.messages.first.content as TextContent).text;
+    return CreateMessageResult(
+      role: Role.assistant,
+      content: Content.text(
+        text: 'You said: "$messageText" and I have ${request.maxTokens}.',
+      ),
+      model: 'test-model',
+    );
+  }
 }
 
 /// The dart tooling daemon currently expects to get vm service uris through

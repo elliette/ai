@@ -246,12 +246,12 @@ base mixin DartToolingDaemonSupport
       await dtd.registerService(kDartMcpServerService, kSamplingRequest, (
         Parameters params,
       ) async {
-        final maxTokens = params['maxTokens'] as int;
-        final messages =
-            params['messages'].asList
-                    .where((message) => message != null && message is String)
-                    .toList()
-                as List<String>;
+        final maxTokens = params['maxTokens'].asInt;
+        final messages = List<String>.from(
+          params['messages'].asList.where(
+            (message) => message != null && message is String,
+          ),
+        );
         final samplingMessages = messages.map(
           (message) => SamplingMessage(
             role: Role.user,
