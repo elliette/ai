@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:dart_mcp/server.dart';
 import 'package:dds_service_extensions/dds_service_extensions.dart';
 import 'package:dtd/dtd.dart';
+import 'package:json_rpc_2/json_rpc_2.dart';
 import 'package:meta/meta.dart';
 import 'package:unified_analytics/unified_analytics.dart' as ua;
 import 'package:vm_service/vm_service.dart';
@@ -41,6 +42,11 @@ base mixin DartToolingDaemonSupport
   ///
   /// Once we connect to dtd, this may be toggled to `true`.
   bool _connectedAppServiceIsSupported = false;
+
+  /// Namespace for service extensions registered on the Dart MCP server.
+  static const kDartMcpServerService = 'dart-mcp-server';
+
+  static const kSamplingRequest = 'samplingRequest';
 
   /// Whether to await the disposal of all [VmService] objects in
   /// [activeVmServices] upon server shutdown or loss of DTD connection.
@@ -234,7 +240,40 @@ base mixin DartToolingDaemonSupport
       _dtd = await DartToolingDaemon.connect(
         Uri.parse(request.arguments![ParameterNames.uri] as String),
       );
-      unawaited(_dtd!.done.then((_) async => await _resetDtd()));
+      final dtd = _dtd!;
+      unawaited(dtd.done.then((_) async => await _resetDtd()));
+
+      await dtd.registerService(kDartMcpServerService, kSamplingRequest, (
+        Parameters params,
+      ) async {
+        final maxTokens = params['maxTokens'] as int;
+        final messages =
+            params['messages'].asList
+                    .where((message) => message != null && message is String)
+                    .toList()
+                as List<String>;
+        final samplingMessages = messages.map(
+          (message) => SamplingMessage(
+            role: Role.user,
+            content: Content.text(text: message),
+          ),
+        );
+
+        final request = CreateMessageRequest(
+          messages: samplingMessages.toList(),
+          maxTokens: maxTokens,
+        );
+        try {
+          final result = await createMessage(request);
+          final response = result.content;
+          final responseText = response.isText
+              ? (response as TextContent).text
+              : 'Invalid response from MCP.';
+          return StringResponse(responseText).toJson();
+        } catch (e) {
+          return {'error': 'Failed to create message: $e'};
+        }
+      });
 
       await _listenForServices();
       return CallToolResult(
