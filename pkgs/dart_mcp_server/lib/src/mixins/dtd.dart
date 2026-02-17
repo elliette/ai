@@ -203,6 +203,9 @@ base mixin DartToolingDaemonSupport
     registerTool(getSelectedWidgetTool, selectedWidget);
     registerTool(setWidgetSelectionModeTool, _setWidgetSelectionMode);
     registerTool(flutterDriverTool, _callFlutterDriver);
+    registerTool(switchDevToolsScreenTool, _switchDevToolsScreen);
+    registerTool(highlightDevToolsWidgetTool, _highlightDevToolsWidget);
+    registerTool(visibleDevToolsWidgetsTool, _getVisibleDevToolsWidgets);
 
     return super.initialize(request);
   }
@@ -219,6 +222,9 @@ base mixin DartToolingDaemonSupport
     getSelectedWidgetTool,
     setWidgetSelectionModeTool,
     flutterDriverTool,
+    switchDevToolsScreenTool,
+    highlightDevToolsWidgetTool,
+    visibleDevToolsWidgetsTool,
   ];
 
   @override
@@ -327,6 +333,160 @@ base mixin DartToolingDaemonSupport
       return CallToolResult(
         isError: true,
         content: [Content.text(text: 'Connection failed: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Switches the DevTools screen to the specified [screenId].
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _switchDevToolsScreen(CallToolRequest request) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final screenId = request.arguments!['screenId'] as String;
+
+    try {
+      await dtd.call(
+        'DartDevTools',
+        'switchScreen',
+        params: {'screenId': screenId},
+      );
+      return CallToolResult(
+        content: [
+          TextContent(
+            text: 'Successfully switched DevTools screen to "$screenId".',
+          ),
+        ],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.switchScreen" service is not available. '
+                  'Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to switch DevTools screen: ${e.message}'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Failed to switch DevTools screen: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Highlights a specific widget in Dart DevTools.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _highlightDevToolsWidget(
+    CallToolRequest request,
+  ) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final widgetId = request.arguments!['widgetId'] as String;
+
+    try {
+      await dtd.call(
+        'DartDevTools',
+        'highlightWidget',
+        params: {'widgetId': widgetId},
+      );
+      return CallToolResult(
+        content: [
+          TextContent(
+            text: 'Successfully highlighted widget "$widgetId" in DevTools.',
+          ),
+        ],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.highlightWidget" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to highlight widget: ${e.message}'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Failed to highlight widget: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Retrieves the list of currently visible widget IDs from Dart DevTools.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _getVisibleDevToolsWidgets(
+    CallToolRequest request,
+  ) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    try {
+      final result = await dtd.call(
+        'DartDevTools',
+        'getVisibleWidgets',
+        params: {},
+      );
+      final widgetIds =
+          (result.result['widgets'] as List?)?.cast<String>() ?? [];
+      return CallToolResult(
+        content: [TextContent(text: jsonEncode(widgetIds))],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.getVisibleWidgets" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text: 'Failed to get visible DevTools widgets: ${e.message}',
+          ),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to get visible DevTools widgets: $e'),
+        ],
       )..failureReason = CallToolFailureReason.unhandledError;
     }
   }
@@ -1155,6 +1315,62 @@ base mixin DartToolingDaemonSupport
           FeatureCategory.flutter,
           FeatureCategory.analysis,
         ];
+
+  @visibleForTesting
+  static final switchDevToolsScreenTool = Tool(
+    name: ToolNames.switchDevToolsScreen.name,
+    description:
+        'Switches the DevTools screen to the specified screenId. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Switch DevTools Screen',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'screenId': Schema.string(
+          description: 'The ID of the DevTools screen to switch to.',
+          enumValues: ['debugger', 'inspector', 'memory'],
+        ),
+      },
+      required: const ['screenId'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final highlightDevToolsWidgetTool = Tool(
+    name: ToolNames.highlightDevToolsWidget.name,
+    description:
+        'Highlights a specific widget in Dart DevTools. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Highlight DevTools Widget',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'widgetId': Schema.string(
+          description: 'The ID of the widget to highlight.',
+        ),
+      },
+      required: const ['widgetId'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final visibleDevToolsWidgetsTool = Tool(
+    name: ToolNames.visibleDevToolsWidgets.name,
+    description:
+        'Retrieves a list of currently visible widget IDs from Dart DevTools. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Get visible DevTools widgets',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(additionalProperties: false),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
 
   static final _connectedAppsNotSupported = CallToolResult(
     isError: true,

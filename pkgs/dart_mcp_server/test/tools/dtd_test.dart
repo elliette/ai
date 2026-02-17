@@ -107,6 +107,100 @@ void main() {
           return (responseContent['text'] as String).split('\n');
         }
 
+        test('can switch devtools screen', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'switchScreen', (
+            params,
+          ) async {
+            return {'type': 'Success', 'screenId': params['screenId'].asString};
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final switchScreenTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.switchDevToolsScreenTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(
+              name: switchScreenTool.name,
+              arguments: {'screenId': 'inspector'},
+            ),
+          );
+
+          expect(result.isError, isNot(true));
+          expect(
+            (result.content.first as TextContent).text,
+            contains('Successfully switched DevTools screen to "inspector".'),
+          );
+        });
+
+        test('can get visible devtools widgets', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'getVisibleWidgets', (
+            params,
+          ) async {
+            return {
+              'type': 'Success',
+              'widgets': ['widget1', 'widget2'],
+            };
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final visibleWidgetsTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.visibleDevToolsWidgetsTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(name: visibleWidgetsTool.name, arguments: {}),
+          );
+
+          expect(result.isError, isNot(true));
+          final content = result.content.first as TextContent;
+          final widgetIds = (jsonDecode(content.text) as List).cast<String>();
+          expect(widgetIds, containsAll(['widget1', 'widget2']));
+        });
+
+        test('can highlight devtools widget', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'highlightWidget', (
+            params,
+          ) async {
+            return {'type': 'Success', 'widgetId': params['widgetId'].asString};
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final highlightWidgetTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.highlightDevToolsWidgetTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(
+              name: highlightWidgetTool.name,
+              arguments: {'widgetId': 'widget123'},
+            ),
+          );
+
+          expect(result.isError, isNot(true));
+          expect(
+            (result.content.first as TextContent).text,
+            contains(
+              'Successfully highlighted widget "widget123" in DevTools.',
+            ),
+          );
+        });
+
         Future<String> getSamplingServiceName(
           DartToolingDaemon dtdClient,
         ) async {

@@ -55,7 +55,10 @@ enum ToolNames {
   setWidgetSelectionMode('set_widget_selection_mode'),
   signatureHelp('signature_help'),
   stopApp('stop_app'),
-  takeScreenshot('take_screenshot');
+  switchDevToolsScreen('switch_dev_tools_screen'),
+  highlightDevToolsWidget('highlight_dev_tools_widget'),
+  takeScreenshot('take_screenshot'),
+  visibleDevToolsWidgets('visible_dev_tools_widgets');
 
   final String name;
   const ToolNames(this.name);
