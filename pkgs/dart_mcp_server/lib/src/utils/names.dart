@@ -33,6 +33,8 @@ enum ToolNames {
   createProject('create_project'),
   dartFix('dart_fix'),
   dartFormat('dart_format'),
+  devToolsScreens('dev_tools_screens'),
+  devtoolsScreenshot('devtools_screenshot'),
   flutterDriverCommand('flutter_driver_command'),
   getActiveLocation('get_active_location'),
   getAppLogs('get_app_logs'),
