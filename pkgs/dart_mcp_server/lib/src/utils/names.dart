@@ -30,6 +30,7 @@ enum ToolNames {
   addRoots('add_roots'),
   analyzeFiles('analyze_files'),
   connectDartToolingDaemon('connect_dart_tooling_daemon'),
+  capturePerformanceSnapshot('capture_performance_snapshot'),
   createProject('create_project'),
   dartFix('dart_fix'),
   dartFormat('dart_format'),

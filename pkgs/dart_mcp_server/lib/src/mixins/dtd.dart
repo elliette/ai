@@ -38,7 +38,7 @@ extension McpServiceConstants on Never {
 ///
 /// The MCPServer must already have the [ToolsSupport] mixin applied.
 base mixin DartToolingDaemonSupport
-    on ToolsSupport, LoggingSupport, ResourcesSupport
+    on ToolsSupport, LoggingSupport, ResourcesSupport, ElicitationRequestSupport
     implements AnalyticsSupport {
   DartToolingDaemon? _dtd;
 
@@ -208,6 +208,7 @@ base mixin DartToolingDaemonSupport
     registerTool(devtoolsScreenshotTool, _captureDevToolsScreenshot);
     registerTool(devToolsScreensTool, _getDevToolsScreens);
     registerTool(visibleDevToolsWidgetsTool, _getVisibleDevToolsWidgets);
+    registerTool(capturePerformanceSnapshotTool, _capturePerformanceSnapshot);
 
     return super.initialize(request);
   }
@@ -229,12 +230,83 @@ base mixin DartToolingDaemonSupport
     devtoolsScreenshotTool,
     devToolsScreensTool,
     visibleDevToolsWidgetsTool,
+    capturePerformanceSnapshotTool,
   ];
 
   @override
   Future<void> shutdown() async {
     await _resetDtd();
     await super.shutdown();
+  }
+
+  /// Captures a performance snapshot from DevTools.
+  ///
+  /// This tool orchestrates a workflow to capture a performance snapshot:
+  /// 1. Connects to DTD (eliciting URI if needed).
+  /// 2. Elicits user to open DevTools in browser.
+  /// 3. Switches to the performance screen.
+  /// 4. Waits for user interaction (5s).
+  /// 5. Captures a screenshot.
+  Future<CallToolResult> _capturePerformanceSnapshot(
+    CallToolRequest request,
+  ) async {
+    // 1. Connect logic
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    log(
+      LoggingLevel.info,
+      'Please ensure DevTools is open in your browser. You can run "Open DevTools in browser" with the command palette.'
+      'Waiting 10 seconds for you to open it and then will attempt to capture a performance snapshot...',
+    );
+
+    await Future<void>.delayed(const Duration(seconds: 10));
+
+    // 3. Get screens and check for 'performance'
+    final screensResult = await _getDevToolsScreens(request);
+    if (screensResult.isError == true) return screensResult;
+    final screensJson = (screensResult.content.first as TextContent).text;
+    final screens = (jsonDecode(screensJson) as List).cast<String>();
+
+    if (!screens.contains('performance')) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'The "performance" screen is not available. Available screens: $screens. '
+                'Please ensure your app is running and supports the performance screen.',
+          ),
+        ],
+      );
+    }
+
+    // 4. Switch to performance screen
+    final switchResult = await _switchDevToolsScreen(
+      CallToolRequest(
+        name: 'switch_dev_tools_screen',
+        arguments: {'screenId': 'performance'},
+      ),
+    );
+    if (switchResult.isError == true) return switchResult;
+
+    // 5. Wait for user interaction
+
+    log(
+      LoggingLevel.info,
+      'Please ensure DevTools is open in your browser. You can run "Open DevTools in browser" with the command palette.'
+      'Waiting 10 seconds for you to open it and then will attempt to capture a performance snapshot...',
+    );
+
+    await Future<void>.delayed(const Duration(seconds: 10));
+
+    // 6. Capture screenshot
+    return _captureDevToolsScreenshot(
+      CallToolRequest(
+        name: 'devtools_screenshot',
+        arguments: {'screenId': 'performance'},
+      ),
+    );
   }
 
   Future<CallToolResult> _callFlutterDriver(CallToolRequest request) async {
@@ -453,13 +525,13 @@ base mixin DartToolingDaemonSupport
     final dtd = _dtd;
     if (dtd == null) return _dtdNotConnected;
 
-    final screenId = request.arguments!['screenId'] as String;
+    final screenId = request.arguments?['screenId'] as String?;
 
     try {
       final result = await dtd.call(
         'DartDevTools',
         'getVisibleWidgets',
-        params: {'screenId': screenId},
+        params: {if (screenId != null) 'screenId': screenId},
       );
       final widgetIds =
           (result.result['widgets'] as List?)?.cast<String>() ?? [];
@@ -507,13 +579,13 @@ base mixin DartToolingDaemonSupport
     final dtd = _dtd;
     if (dtd == null) return _dtdNotConnected;
 
-    final screenId = request.arguments!['screenId'] as String;
+    final screenId = request.arguments?['screenId'] as String?;
 
     try {
       final result = await dtd.call(
         'DartDevTools',
         'captureScreenshot',
-        params: {'screenId': screenId},
+        params: {if (screenId != null) 'screenId': screenId},
       );
       final rawImage = (result.result['rawImage'] as List?)?.cast<int>();
       if (rawImage == null) {
@@ -1496,7 +1568,7 @@ base mixin DartToolingDaemonSupport
               'If not provided, the current screen is captured.',
         ),
       },
-      required: const ['screenId'],
+
       additionalProperties: false,
     ),
   )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
@@ -1532,9 +1604,28 @@ base mixin DartToolingDaemonSupport
               'If not provided, the current screen is captured.',
         ),
       },
-      required: const ['screenId'],
+
       additionalProperties: false,
     ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final capturePerformanceSnapshotTool = Tool(
+    name: ToolNames.capturePerformanceSnapshot.name,
+    description:
+        'Captures a performance snapshot from DevTools. '
+        'This tool should be used when users ask about jank or performance issues with their app. '
+        'This tool orchestrates a workflow to capture a performance snapshot: '
+        '1. Connects to DTD (fails if not connected). '
+        '2. Waits 10s for user to open DevTools. '
+        '3. Switches to the performance screen. '
+        '4. Captures a screenshot.',
+    annotations: ToolAnnotations(
+      title: 'Capture Performance Snapshot',
+      destructiveHint: false,
+      readOnlyHint: false,
+    ),
+    inputSchema: Schema.object(additionalProperties: false),
   )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
 
   static final _connectedAppsNotSupported = CallToolResult(

@@ -239,7 +239,7 @@ void main() {
           // Register a fake DartDevTools service
           await dtdClient.registerService(
             'DartDevTools',
-            'getDevToolsScreens',
+            'getVisibleScreens',
             (params) async {
               return {
                 'type': 'Success',
@@ -502,6 +502,52 @@ void main() {
           }
         });
       });
+
+      test('can capture performance snapshot', () async {
+        final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+        // Register fake DartDevTools services
+        await dtdClient.registerService('DartDevTools', 'getVisibleScreens', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'screens': ['performance'],
+          };
+        });
+
+        await dtdClient.registerService('DartDevTools', 'switchScreen', (
+          params,
+        ) async {
+          return {'type': 'Success', 'screenId': params['screenId'].asString};
+        });
+
+        await dtdClient.registerService('DartDevTools', 'captureScreenshot', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'rawImage': [1, 2, 3, 4],
+          };
+        });
+
+        final tools = (await testHarness.mcpServerConnection.listTools()).tools;
+        final captureTool = tools.singleWhere(
+          (t) =>
+              t.name ==
+              DartToolingDaemonSupport.capturePerformanceSnapshotTool.name,
+        );
+
+        final result = await testHarness.callToolWithRetry(
+          CallToolRequest(name: captureTool.name),
+        );
+
+        expect(result.isError, isNot(true));
+        final content = result.content.first as ImageContent;
+        expect(content.mimeType, 'image/png');
+        expect(content.data, base64Encode([1, 2, 3, 4]));
+      });
+
 
       group('dart cli tests', () {
         test('can perform a hot reload', () async {
