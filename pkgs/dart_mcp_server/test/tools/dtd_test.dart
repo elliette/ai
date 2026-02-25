@@ -548,6 +548,49 @@ void main() {
         expect(content.data, base64Encode([1, 2, 3, 4]));
       });
 
+      test('can read performance snapshot resource', () async {
+        final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+        // Register fake DartDevTools services
+        await dtdClient.registerService('DartDevTools', 'getVisibleScreens', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'screens': ['performance'],
+          };
+        });
+
+        await dtdClient.registerService('DartDevTools', 'switchScreen', (
+          params,
+        ) async {
+          return {'type': 'Success', 'screenId': params['screenId'].asString};
+        });
+
+        await dtdClient.registerService('DartDevTools', 'captureScreenshot', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'rawImage': [1, 2, 3, 4],
+          };
+        });
+
+        final resources =
+            (await testHarness.mcpServerConnection.listResources()).resources;
+        final snapshotResource = resources.singleWhere(
+          (r) => r.uri == ResourceNames.performanceSnapshot,
+        );
+
+        final result = await testHarness.mcpServerConnection.readResource(
+          ReadResourceRequest(uri: snapshotResource.uri),
+        );
+
+        final content = result.contents.first as BlobResourceContents;
+        expect(content.mimeType, 'image/png');
+        expect(content.blob, base64Encode([1, 2, 3, 4]));
+      });
+
 
       group('dart cli tests', () {
         test('can perform a hot reload', () async {

@@ -25,6 +25,11 @@ extension ParameterNames on Never {
   static const userJourney = 'user_journey';
 }
 
+/// A namespace for all the resource names.
+extension ResourceNames on Never {
+  static const performanceSnapshot = 'performanceSnapshot';
+}
+
 /// The names of all the tools provided by the server.
 enum ToolNames {
   addRoots('add_roots'),

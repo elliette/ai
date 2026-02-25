@@ -210,6 +210,16 @@ base mixin DartToolingDaemonSupport
     registerTool(visibleDevToolsWidgetsTool, _getVisibleDevToolsWidgets);
     registerTool(capturePerformanceSnapshotTool, _capturePerformanceSnapshot);
 
+    addResource(
+      Resource(
+        uri: ResourceNames.performanceSnapshot,
+        name: 'Performance Snapshot',
+        description: 'A snapshot of the performance screen from DevTools.',
+        mimeType: 'image/png',
+      ),
+      _performanceSnapshot,
+    );
+
     return super.initialize(request);
   }
 
@@ -294,11 +304,10 @@ base mixin DartToolingDaemonSupport
 
     log(
       LoggingLevel.info,
-      'Please ensure DevTools is open in your browser. You can run "Open DevTools in browser" with the command palette.'
-      'Waiting 10 seconds for you to open it and then will attempt to capture a performance snapshot...',
+      'Please interact with your app for the next 5 seconds in a way that causes jank. I will capture a screenshot after 5 seconds.',
     );
 
-    await Future<void>.delayed(const Duration(seconds: 10));
+    await Future<void>.delayed(const Duration(seconds: 5));
 
     // 6. Capture screenshot
     return _captureDevToolsScreenshot(
@@ -307,6 +316,37 @@ base mixin DartToolingDaemonSupport
         arguments: {'screenId': 'performance'},
       ),
     );
+  }
+
+  Future<ReadResourceResult> _performanceSnapshot(
+    ReadResourceRequest request,
+  ) async {
+    final result = await _capturePerformanceSnapshot(
+      CallToolRequest(
+        name: ToolNames.capturePerformanceSnapshot.name,
+        arguments: {},
+      ),
+    );
+
+    if (result.isError == true) {
+      throw Exception(
+        result.content.map((c) => (c as TextContent).text).join('\n'),
+      );
+    }
+
+    final content = result.content.first;
+    if (content is ImageContent) {
+      return ReadResourceResult(
+        contents: [
+          BlobResourceContents(
+            uri: request.uri,
+            mimeType: 'image/png',
+            blob: content.data,
+          ),
+        ],
+      );
+    }
+    throw Exception('Unexpected content type from performance snapshot');
   }
 
   Future<CallToolResult> _callFlutterDriver(CallToolRequest request) async {
