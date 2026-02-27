@@ -28,6 +28,7 @@ extension ParameterNames on Never {
 /// A namespace for all the resource names.
 extension ResourceNames on Never {
   static const performanceSnapshot = 'performanceSnapshot';
+  static const recordFrames = 'recordFrames';
 }
 
 /// The names of all the tools provided by the server.
@@ -45,7 +46,6 @@ enum ToolNames {
   getActiveLocation('get_active_location'),
   getAppLogs('get_app_logs'),
   getRuntimeErrors('get_runtime_errors'),
-  getSelectedWidget('get_selected_widget'),
   getWidgetTree('get_widget_tree'),
   hotReload('hot_reload'),
   hotRestart('hot_restart'),
@@ -59,6 +59,7 @@ enum ToolNames {
   removeRoots('remove_roots'),
   resolveWorkspaceSymbol('resolve_workspace_symbol'),
   ripGrepPackages('rip_grep_packages'),
+  recordFrames('record_frames'),
   runTests('run_tests'),
   setWidgetSelectionMode('set_widget_selection_mode'),
   signatureHelp('signature_help'),
@@ -77,6 +78,7 @@ enum ToolNames {
 
 /// The names of all the prompts provided by the server.
 enum PromptNames {
+  capturePerformanceSnapshot('capture_performance_snapshot'),
   flutterDriverUserJourneyTest('flutter_driver_user_journey_test');
 
   final String name;

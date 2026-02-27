@@ -786,6 +786,95 @@ void main() {
         });
       });
 
+      test('can record frames via tool', () async {
+        // Set delays to zero for testing.
+        DartToolingDaemonSupport.recordFramesDelay = Duration.zero;
+        DartToolingDaemonSupport.recordFramesDuration = const Duration(
+          milliseconds: 500,
+        );
+        addTearDown(() {
+          DartToolingDaemonSupport.recordFramesDelay = const Duration(
+            seconds: 5,
+          );
+          DartToolingDaemonSupport.recordFramesDuration = const Duration(
+            seconds: 5,
+          );
+        });
+
+        final vmService = FakeVmService();
+        server.activeVmServices['ws://fake'] = Future.value(vmService);
+
+        final tools = (await testHarness.mcpServerConnection.listTools()).tools;
+        final recordFramesTool = tools.singleWhere(
+          (t) => t.name == ToolNames.recordFrames.name,
+        );
+
+        final future = testHarness.mcpServerConnection.callTool(
+          CallToolRequest(name: recordFramesTool.name, arguments: {}),
+        );
+
+        // Simulate frame events.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        vmService.emitFrameEvent({'data': 'frame1'});
+        vmService.emitFrameEvent({'data': 'frame2'});
+
+        final result = await future;
+        final content = result.content.first as TextContent;
+        final frames = (jsonDecode(content.text) as List)
+            .cast<Map<String, Object?>>();
+
+        expect(frames, [
+          {'data': 'frame1'},
+          {'data': 'frame2'},
+        ]);
+      });
+
+      test('can record frames via resource (wraps tool)', () async {
+        // Set delays to zero for testing.
+        // Set delays to zero for testing delay, but keep duration for recording.
+        DartToolingDaemonSupport.recordFramesDelay = Duration.zero;
+        DartToolingDaemonSupport.recordFramesDuration = const Duration(
+          milliseconds: 500,
+        );
+        addTearDown(() {
+          DartToolingDaemonSupport.recordFramesDelay = const Duration(
+            seconds: 5,
+          );
+          DartToolingDaemonSupport.recordFramesDuration = const Duration(
+            seconds: 5,
+          );
+        });
+
+        final vmService = FakeVmService();
+        server.activeVmServices['ws://fake'] = Future.value(vmService);
+
+        final resources =
+            (await testHarness.mcpServerConnection.listResources()).resources;
+        final recordFramesResource = resources.singleWhere(
+          (r) => r.uri == ResourceNames.recordFrames,
+        );
+
+        final future = testHarness.mcpServerConnection.readResource(
+          ReadResourceRequest(uri: recordFramesResource.uri),
+        );
+
+        // Simulate frame events.
+        // We need to wait a bit for the tool to subscribe.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        vmService.emitFrameEvent({'data': 'frame1'});
+        vmService.emitFrameEvent({'data': 'frame2'});
+
+        final result = await future;
+        final content = result.contents.first as TextResourceContents;
+        final frames = (jsonDecode(content.text) as List)
+            .cast<Map<String, Object?>>();
+
+        expect(frames, [
+          {'data': 'frame1'},
+          {'data': 'frame2'},
+        ]);
+      });
+
       test('can take a screenshot', () async {
         await testHarness.startDebugSession(
           counterAppPath,
@@ -825,76 +914,7 @@ void main() {
         });
       });
 
-      group('get selected widget', () {
-        test('when a selected widget exists', () async {
-          final server = testHarness.serverConnectionPair.server!;
 
-          await testHarness.startDebugSession(
-            counterAppPath,
-            'lib/main.dart',
-            isFlutter: true,
-          );
-          await server.updateActiveVmServices();
-
-          final getWidgetTreeResult = await testHarness.callToolWithRetry(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getWidgetTreeTool.name,
-              arguments: {'summaryOnly': true},
-            ),
-          );
-
-          // Select the first child of the [root] widget.
-          final widgetTree =
-              jsonDecode(
-                    (getWidgetTreeResult.content.first as TextContent).text,
-                  )
-                  as Map<String, Object?>;
-          final children = widgetTree['children'] as List<Object?>;
-          final firstWidgetId =
-              (children.first as Map<String, Object?>)['valueId'];
-          final appVmService = await server.activeVmServices.values.first;
-          final vm = await appVmService.getVM();
-          await appVmService.callServiceExtension(
-            'ext.flutter.inspector.setSelectionById',
-            isolateId: vm.isolates!.first.id,
-            args: {
-              'objectGroup': DartToolingDaemonSupport.inspectorObjectGroup,
-              'arg': firstWidgetId,
-            },
-          );
-
-          // Confirm we can get the selected widget from the MCP tool.
-          final getSelectedWidgetResult = await testHarness.callTool(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getSelectedWidgetTool.name,
-            ),
-          );
-          expect(getSelectedWidgetResult.isError, isNot(true));
-          expect(
-            (getSelectedWidgetResult.content.first as TextContent).text,
-            contains('MyApp'),
-          );
-        });
-
-        test('when there is no selected widget', () async {
-          await testHarness.startDebugSession(
-            counterAppPath,
-            'lib/main.dart',
-            isFlutter: true,
-          );
-          final getSelectedWidgetResult = await testHarness.callToolWithRetry(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getSelectedWidgetTool.name,
-            ),
-          );
-
-          expect(getSelectedWidgetResult.isError, isNot(true));
-          expect(
-            (getSelectedWidgetResult.content.first as TextContent).text,
-            contains('No Widget selected.'),
-          );
-        });
-      });
 
       group('runtime errors', () {
         final errorCountRegex = RegExp(r'Found \d+ errors?:');
@@ -1426,6 +1446,8 @@ void action() {
 }
 ''';
 
+
+
 /// Tries to delete [dir] up to 5 times, waiting 200ms between each.
 ///
 /// Necessary for windows tests.
@@ -1438,5 +1460,31 @@ Future<void> _deleteWithRetry(Directory dir) async {
     } catch (_) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
+  }
+}
+
+class FakeVmService implements VmService {
+  final _extensionController = StreamController<Event>.broadcast();
+
+  @override
+  Stream<Event> get onExtensionEvent => _extensionController.stream;
+
+  void emitFrameEvent(Map<String, Object?> data) {
+    _extensionController.add(
+      Event(
+        kind: 'Flutter.Frame',
+        extensionKind: 'Flutter.Frame',
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        extensionData: ExtensionData.parse(data),
+      ),
+    );
+  }
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    return super.noSuchMethod(invocation);
   }
 }

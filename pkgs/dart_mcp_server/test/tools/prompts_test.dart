@@ -43,7 +43,29 @@ void main() {
                       .having((arg) => arg.required, 'required', false),
                 ]),
               ),
+          isA<Prompt>().having(
+            (p) => p.name,
+            'name',
+            DashPrompts.capturePerformanceSnapshot.name,
+          ),
         ]),
+      );
+    });
+
+    test('can get capture performance snapshot prompt', () async {
+      final server = testHarness.mcpServerConnection;
+      final prompt = await server.getPrompt(
+        GetPromptRequest(name: DashPrompts.capturePerformanceSnapshot.name),
+      );
+      expect(
+        prompt.messages.single,
+        isA<PromptMessage>()
+            .having((m) => m.role, 'role', Role.user)
+            .having(
+              (m) => m.content,
+              'content',
+              equals(DashPrompts.capturePerformanceSnapshotPromptContent),
+            ),
       );
     });
 

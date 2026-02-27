@@ -69,6 +69,12 @@ base mixin DartToolingDaemonSupport
   @visibleForTesting
   static const inspectorObjectGroup = 'dart-tooling-mcp-server';
 
+  @visibleForTesting
+  static Duration recordFramesDelay = const Duration(seconds: 5);
+
+  @visibleForTesting
+  static Duration recordFramesDuration = const Duration(seconds: 5);
+
   /// The prefix for Flutter Widget Inspector service extensions.
   ///
   /// See https://github.com/flutter/flutter/blob/master/packages/flutter/lib/src/widgets/service_extensions.dart#L126
@@ -200,7 +206,7 @@ base mixin DartToolingDaemonSupport
 
     if (enableScreenshots) registerTool(screenshotTool, takeScreenshot);
     registerTool(getWidgetTreeTool, widgetTree);
-    registerTool(getSelectedWidgetTool, selectedWidget);
+
     registerTool(setWidgetSelectionModeTool, _setWidgetSelectionMode);
     registerTool(flutterDriverTool, _callFlutterDriver);
     registerTool(switchDevToolsScreenTool, _switchDevToolsScreen);
@@ -209,6 +215,7 @@ base mixin DartToolingDaemonSupport
     registerTool(devToolsScreensTool, _getDevToolsScreens);
     registerTool(visibleDevToolsWidgetsTool, _getVisibleDevToolsWidgets);
     registerTool(capturePerformanceSnapshotTool, _capturePerformanceSnapshot);
+    registerTool(recordFramesTool, _recordFramesTool);
 
     addResource(
       Resource(
@@ -218,6 +225,16 @@ base mixin DartToolingDaemonSupport
         mimeType: 'image/png',
       ),
       _performanceSnapshot,
+    );
+
+    addResource(
+      Resource(
+        uri: ResourceNames.recordFrames,
+        name: 'Record Frames',
+        description: 'Record frames from the performance screen from DevTools.',
+        mimeType: 'application/json',
+      ),
+      _recordFrames,
     );
 
     return super.initialize(request);
@@ -232,7 +249,7 @@ base mixin DartToolingDaemonSupport
     hotReloadTool,
     screenshotTool,
     getWidgetTreeTool,
-    getSelectedWidgetTool,
+
     setWidgetSelectionModeTool,
     flutterDriverTool,
     switchDevToolsScreenTool,
@@ -241,6 +258,7 @@ base mixin DartToolingDaemonSupport
     devToolsScreensTool,
     visibleDevToolsWidgetsTool,
     capturePerformanceSnapshotTool,
+    recordFramesTool,
   ];
 
   @override
@@ -316,6 +334,68 @@ base mixin DartToolingDaemonSupport
         arguments: {'screenId': 'performance'},
       ),
     );
+  }
+
+  Future<ReadResourceResult> _recordFrames(ReadResourceRequest request) async {
+    final result = await _recordFramesTool(
+      CallToolRequest(name: ToolNames.recordFrames.name, arguments: {}),
+    );
+
+    if (result.isError == true) {
+      throw Exception(
+        result.content.map((c) => (c as TextContent).text).join('\n'),
+      );
+    }
+
+    return ReadResourceResult(
+      contents: [
+        TextResourceContents(
+          uri: request.uri,
+          text: (result.content.first as TextContent).text,
+        ),
+      ],
+    );
+  }
+
+  Future<CallToolResult> _recordFramesTool(CallToolRequest request) async {
+    // 1. Get the first active VM service.
+    // We can't identify which one the user wants, so we pick the first one.
+    if (activeVmServices.isEmpty) {
+      // Try to update active VM services first
+      await updateActiveVmServices();
+      if (activeVmServices.isEmpty) {
+        throw Exception(
+          'No active VM services found. Please make sure an app is running.',
+        );
+      }
+    }
+
+    // We just pick the first one.
+    // In the future, we might want to allow passing a device or app ID in the
+    // resource URI (e.g. recordFrames/flutter_app_123).
+    final vmService = await activeVmServices.values.first;
+
+    // 2. Wait 5 seconds (as per requirements).
+    await Future<void>.delayed(recordFramesDelay);
+
+    // 3. Record Flutter frames for 5 seconds.
+    final frames = <Map<String, Object?>>[];
+    final subscription = vmService.onExtensionEvent.listen((event) {
+      if (event.extensionKind == 'Flutter.Frame') {
+        final data = event.extensionData?.data;
+        if (data != null) {
+          frames.add(data);
+        }
+      }
+    });
+
+    try {
+      await Future<void>.delayed(recordFramesDuration);
+    } finally {
+      await subscription.cancel();
+    }
+
+    return CallToolResult(content: [TextContent(text: jsonEncode(frames))]);
   }
 
   Future<ReadResourceResult> _performanceSnapshot(
@@ -1035,42 +1115,6 @@ base mixin DartToolingDaemonSupport
     );
   }
 
-  /// Retrieves the selected widget from the currently running app.
-  ///
-  /// If more than one debug session is active, then it just uses the first one.
-  // TODO: support passing a debug session id when there is more than one debug
-  // session.
-  Future<CallToolResult> selectedWidget(CallToolRequest request) async {
-    return _callOnVmService(
-      callback: (vmService) async {
-        final vm = await vmService.getVM();
-        final isolateId = vm.isolates!.first.id;
-        try {
-          final result = await vmService.callServiceExtension(
-            '$_inspectorServiceExtensionPrefix.getSelectedSummaryWidget',
-            isolateId: isolateId,
-            args: {'objectGroup': inspectorObjectGroup},
-          );
-
-          final widget = result.json?['result'];
-          if (widget == null) {
-            return CallToolResult(
-              content: [TextContent(text: 'No Widget selected.')],
-            );
-          }
-          return CallToolResult(
-            content: [TextContent(text: jsonEncode(widget))],
-          );
-        } catch (e) {
-          return CallToolResult(
-            isError: true,
-            content: [TextContent(text: 'Failed to get selected widget: $e')],
-          )..failureReason = CallToolFailureReason.unhandledError;
-        }
-      },
-    );
-  }
-
   /// Enables or disables widget selection mode in the currently running app.
   ///
   /// If more than one debug session is active, then it just uses the first one.
@@ -1490,18 +1534,6 @@ base mixin DartToolingDaemonSupport
   )..categories = [FeatureCategory.flutter];
 
   @visibleForTesting
-  static final getSelectedWidgetTool = Tool(
-    name: ToolNames.getSelectedWidget.name,
-    description:
-        'Retrieves the selected widget from the active Flutter application. '
-        'Requires "${connectTool.name}" to be successfully called first.',
-    annotations: ToolAnnotations(
-      title: 'Get selected widget',
-      readOnlyHint: true,
-    ),
-    inputSchema: Schema.object(additionalProperties: false),
-  )..categories = [FeatureCategory.flutter, FeatureCategory.widgetInspector];
-
   @visibleForTesting
   static final setWidgetSelectionModeTool = Tool(
     name: ToolNames.setWidgetSelectionMode.name,
@@ -1667,6 +1699,19 @@ base mixin DartToolingDaemonSupport
     ),
     inputSchema: Schema.object(additionalProperties: false),
   )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final recordFramesTool = Tool(
+    name: ToolNames.recordFrames.name,
+    description:
+        'Records Flutter frames for a specified duration (default 5s).',
+    annotations: ToolAnnotations(
+      title: 'Record Flutter Frames',
+      destructiveHint: false,
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(additionalProperties: false),
+  )..categories = [FeatureCategory.flutter];
 
   static final _connectedAppsNotSupported = CallToolResult(
     isError: true,

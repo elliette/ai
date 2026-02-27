@@ -15,10 +15,14 @@ base mixin DashPrompts on PromptsSupport {
   @override
   FutureOr<InitializeResult> initialize(InitializeRequest request) {
     addPrompt(flutterDriverUserJourneyTest, _flutterDriverUserJourneyPrompt);
+    addPrompt(capturePerformanceSnapshot, _capturePerformanceSnapshotPrompt);
     return super.initialize(request);
   }
 
-  static final List<Prompt> allPrompts = [flutterDriverUserJourneyTest];
+  static final allPrompts = [
+    flutterDriverUserJourneyTest,
+    capturePerformanceSnapshot,
+  ];
 
   /// Creates the flutter driver user journey prompt based on a request.
   GetPromptResult _flutterDriverUserJourneyPrompt(GetPromptRequest request) {
@@ -39,6 +43,27 @@ base mixin DashPrompts on PromptsSupport {
     );
   }
 
+  /// Creates the capture performance snapshot prompt.
+  GetPromptResult _capturePerformanceSnapshotPrompt(GetPromptRequest request) {
+    return GetPromptResult(
+      messages: [
+        PromptMessage(
+          role: Role.user,
+          content: capturePerformanceSnapshotPromptContent,
+        ),
+      ],
+    );
+  }
+
+  @visibleForTesting
+  static final capturePerformanceSnapshot = Prompt(
+    name: PromptNames.capturePerformanceSnapshot.name,
+    title: 'Capture Performance Snapshot',
+    description: '''
+Prompts the LLM to capture a performance snapshot using DevTools.
+''',
+  )..categories = [FeatureCategory.performance];
+
   @visibleForTesting
   static final flutterDriverUserJourneyTest = Prompt(
     name: PromptNames.flutterDriverUserJourneyTest.name,
@@ -57,6 +82,19 @@ a flutter driver test and write that to disk.
       ),
     ],
   )..categories = [FeatureCategory.flutterDriver];
+
+  @visibleForTesting
+  static final capturePerformanceSnapshotPromptContent = Content.text(
+    text: '''
+Perform the following tasks in order:
+
+1. Connect to the Dart Tooling Daemon (DTD) using the `connect_dart_tooling_daemon` tool.
+2. Prompt the user to open the DevTools in a browser, and wait for them to confirm they have done so.
+3. Switch to the performance screen using the `switch_dev_tools_screen` tool with `screenId` set to `performance`.
+4. Prompt the user to interact with their app for 10 seconds to generate performance data. Ask them to confirm when they start interacting.
+5. Wait 10 seconds, then capture a screenshot of the performance screen using the `devtools_screenshot` tool with `screenId` set to `performance`.
+''',
+  );
 
   @visibleForTesting
   static final flutterDriverUserJourneyPromptContent = Content.text(
