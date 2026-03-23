@@ -54,6 +54,7 @@ enum ToolNames {
   pub('pub'),
   pubDevSearch('pub_dev_search'),
   readPackageUris('read_package_uris'),
+  recordFrames('record_frames'),
   removeRoots('remove_roots'),
   ripGrepPackages('rip_grep_packages'),
   runTests('run_tests'),
@@ -69,7 +70,8 @@ enum ToolNames {
 
 /// The names of all the prompts provided by the server.
 enum PromptNames {
-  flutterDriverUserJourneyTest('flutter_driver_user_journey_test');
+  flutterDriverUserJourneyTest('flutter_driver_user_journey_test'),
+  analyzeFlutterPerformance('analyze_flutter_performance');
 
   final String name;
   const PromptNames(this.name);

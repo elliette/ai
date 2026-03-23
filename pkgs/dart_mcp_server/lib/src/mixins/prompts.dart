@@ -15,10 +15,14 @@ base mixin DashPrompts on PromptsSupport {
   @override
   FutureOr<InitializeResult> initialize(InitializeRequest request) {
     addPrompt(flutterDriverUserJourneyTest, _flutterDriverUserJourneyPrompt);
+    addPrompt(analyzeFlutterPerformance, _analyzeFlutterPerformancePrompt);
     return super.initialize(request);
   }
 
-  static final List<Prompt> allPrompts = [flutterDriverUserJourneyTest];
+  static final List<Prompt> allPrompts = [
+    flutterDriverUserJourneyTest,
+    analyzeFlutterPerformance,
+  ];
 
   /// Creates the flutter driver user journey prompt based on a request.
   GetPromptResult _flutterDriverUserJourneyPrompt(GetPromptRequest request) {
@@ -86,6 +90,42 @@ Perform the following tasks in order:
 - After writing the test, first analyze the project for errors, and format it.
 - Next, execute the test using the command `flutter drive --driver <test-path>`
   and verify that it passes.
+''',
+  );
+
+  /// Creates the capture performance snapshot prompt.
+  GetPromptResult _analyzeFlutterPerformancePrompt(GetPromptRequest request) {
+    return GetPromptResult(
+      messages: [
+        PromptMessage(
+          role: Role.user,
+          content: analyzeFlutterPerformancePromptContent,
+        ),
+      ],
+    );
+  }
+
+  @visibleForTesting
+  static final analyzeFlutterPerformance = Prompt(
+    name: PromptNames.analyzeFlutterPerformance.name,
+    title: 'Analyze Flutter Performance',
+    description: '''
+Prompts the LLM to analyze the performance of a Flutter application.
+''',
+  )..categories = [FeatureCategory.dartToolingDaemon];
+
+  @visibleForTesting
+  static final analyzeFlutterPerformancePromptContent = Content.text(
+    text: '''
+Perform the following tasks in order:
+1. If the user did not provide a description of the scenario they are trying to analyze, ask them to provide one.
+2. Based on the scenario, try to diagnose any performance issues by looking only at their app's code.
+3. After you have an idea of what might be causing the performance issues, ask the user if they want you to capture a performance snapshot of their app.
+4. If no, jump to step 6.
+5. If yes, proceed to the following steps:
+5a. Ask the user for the VM service URI of their app running in profile mode.
+5b. Use the `record_frames` tool with the VM service URI to capture a performance snapshot of their app.
+6. Summarize your findings. Use the results from step 2 (analyzing the code), 5b (record_frames tool, if it was used).
 ''',
   );
 }

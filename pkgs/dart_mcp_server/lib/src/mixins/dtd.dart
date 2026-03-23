@@ -41,7 +41,12 @@ extension McpServiceConstants on Never {
 ///
 /// The MCPServer must already have the [ToolsSupport] mixin applied.
 base mixin DartToolingDaemonSupport
-    on ToolsSupport, LoggingSupport, ResourcesSupport, SdkSupport
+    on
+        ToolsSupport,
+        LoggingSupport,
+        ResourcesSupport,
+        SdkSupport,
+        ElicitationRequestSupport
     implements AnalyticsSupport, ProcessManagerSupport {
   /// The DTD instances that this server is connected to.
   final List<DartToolingDaemon> _dtds = [];
@@ -197,6 +202,7 @@ base mixin DartToolingDaemonSupport
     registerTool(hotReloadTool, hotReload);
     registerTool(widgetInspectorTool, _widgetInspector);
     registerTool(flutterDriverTool, _callFlutterDriver);
+    registerTool(recordFramesTool, _recordFrames);
 
     return super.initialize(request);
   }
@@ -275,6 +281,84 @@ base mixin DartToolingDaemonSupport
         );
       },
     );
+  }
+
+    Future<CallToolResult> _recordFrames(CallToolRequest request) async {
+    final uri = request.arguments?['uri'] as String?;
+    if (uri == null) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Missing required argument "uri".')],
+      );
+    }
+
+    final vmServiceUri = uri;
+
+    var vmServiceFuture = activeVmServices[vmServiceUri];
+    if (activeVmServices.isEmpty || vmServiceFuture == null) {
+      vmServiceFuture = activeVmServices[vmServiceUri] = vmServiceConnectUri(
+        vmServiceUri,
+      );
+
+      // await updateActiveVmServices();
+    }
+
+    vmServiceFuture = activeVmServices[vmServiceUri];
+    if (vmServiceFuture == null) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'No active VM service found for uri: $vmServiceUri. Please make sure the app is running.',
+          ),
+        ],
+      );
+    }
+
+    final vmService = await vmServiceFuture;
+
+    final progressToken = request.meta?.progressToken;
+    final meta = progressToken != null
+        ? MetaWithProgressToken(progressToken: progressToken)
+        : null;
+
+    // 2. Wait for user to be ready to record.
+    await elicit(
+      ElicitRequest.form(
+        message:
+            'Ready to record frames. Please prepare your app to reproduce the issue, and submit this form when you are ready to start recording.',
+        requestedSchema: ObjectSchema(),
+        meta: meta,
+      ),
+    );
+
+    // 3. Start recording Flutter frames.
+    final frames = <Map<String, Object?>>[];
+    final subscription = vmService.onExtensionEvent.listen((event) {
+      if (event.extensionKind == 'Flutter.Frame') {
+        final data = event.extensionData?.data;
+        if (data != null) {
+          frames.add(data);
+        }
+      }
+    });
+
+    try {
+      // 4. Elicit user response to stop recording.
+      await elicit(
+        ElicitRequest.form(
+          message:
+              'Recording frames. Reproduce the issue and let me know when you are done by submitting this form.',
+          requestedSchema: ObjectSchema(),
+          meta: meta,
+        ),
+      );
+    } finally {
+      await subscription.cancel();
+    }
+
+    return CallToolResult(content: [TextContent(text: jsonEncode(frames))]);
   }
 
   /// Connects to the Dart Tooling Daemon.
@@ -1360,6 +1444,28 @@ base mixin DartToolingDaemonSupport
               'apps are connected.',
         ),
       },
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final recordFramesTool = Tool(
+    name: ToolNames.recordFrames.name,
+    description:
+        'Records Flutter frames for a specified app to help diagnose performance issues.',
+    annotations: ToolAnnotations(
+      title: 'Record Flutter Frames',
+      destructiveHint: false,
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'uri': Schema.string(
+          description:
+              'The VM service URI of the application to record frames for.',
+        ),
+      },
+      required: ['uri'],
       additionalProperties: false,
     ),
   )..categories = [FeatureCategory.flutter];
