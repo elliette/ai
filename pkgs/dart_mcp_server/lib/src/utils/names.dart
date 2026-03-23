@@ -25,19 +25,27 @@ extension ParameterNames on Never {
   static const userJourney = 'user_journey';
 }
 
+/// A namespace for all the resource names.
+extension ResourceNames on Never {
+  static const performanceSnapshot = 'performanceSnapshot';
+  static const recordFrames = 'recordFrames';
+}
+
 /// The names of all the tools provided by the server.
 enum ToolNames {
   addRoots('add_roots'),
   analyzeFiles('analyze_files'),
   connectDartToolingDaemon('connect_dart_tooling_daemon'),
+  capturePerformanceSnapshot('capture_performance_snapshot'),
   createProject('create_project'),
   dartFix('dart_fix'),
   dartFormat('dart_format'),
+  devToolsScreens('dev_tools_screens'),
+  devtoolsScreenshot('devtools_screenshot'),
   flutterDriverCommand('flutter_driver_command'),
   getActiveLocation('get_active_location'),
   getAppLogs('get_app_logs'),
   getRuntimeErrors('get_runtime_errors'),
-  getSelectedWidget('get_selected_widget'),
   getWidgetTree('get_widget_tree'),
   hotReload('hot_reload'),
   hotRestart('hot_restart'),
@@ -51,11 +59,15 @@ enum ToolNames {
   removeRoots('remove_roots'),
   resolveWorkspaceSymbol('resolve_workspace_symbol'),
   ripGrepPackages('rip_grep_packages'),
+  recordFrames('record_frames'),
   runTests('run_tests'),
   setWidgetSelectionMode('set_widget_selection_mode'),
   signatureHelp('signature_help'),
   stopApp('stop_app'),
-  takeScreenshot('take_screenshot');
+  switchDevToolsScreen('switch_dev_tools_screen'),
+  highlightDevToolsWidget('highlight_dev_tools_widget'),
+  takeScreenshot('take_screenshot'),
+  visibleDevToolsWidgets('visible_dev_tools_widgets');
 
   final String name;
   const ToolNames(this.name);
@@ -66,6 +78,7 @@ enum ToolNames {
 
 /// The names of all the prompts provided by the server.
 enum PromptNames {
+  analyzeFlutterPerformance('analyze_flutter_performance_4'),
   flutterDriverUserJourneyTest('flutter_driver_user_journey_test');
 
   final String name;

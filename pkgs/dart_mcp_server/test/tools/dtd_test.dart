@@ -107,6 +107,162 @@ void main() {
           return (responseContent['text'] as String).split('\n');
         }
 
+        test('can switch devtools screen', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'switchScreen', (
+            params,
+          ) async {
+            return {'type': 'Success', 'screenId': params['screenId'].asString};
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final switchScreenTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.switchDevToolsScreenTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(
+              name: switchScreenTool.name,
+              arguments: {'screenId': 'inspector'},
+            ),
+          );
+
+          expect(result.isError, isNot(true));
+          expect(
+            (result.content.first as TextContent).text,
+            contains('Successfully switched DevTools screen to "inspector".'),
+          );
+        });
+
+        test('can get visible devtools widgets', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'getVisibleWidgets', (
+            params,
+          ) async {
+            return {
+              'type': 'Success',
+              'widgets': ['widget1', 'widget2'],
+            };
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final visibleWidgetsTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.visibleDevToolsWidgetsTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(name: visibleWidgetsTool.name, arguments: {}),
+          );
+
+          expect(result.isError, isNot(true));
+          final content = result.content.first as TextContent;
+          final widgetIds = (jsonDecode(content.text) as List).cast<String>();
+          expect(widgetIds, containsAll(['widget1', 'widget2']));
+        });
+
+        test('can highlight devtools widget', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'highlightWidget', (
+            params,
+          ) async {
+            return {'type': 'Success', 'widgetId': params['widgetId'].asString};
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final highlightWidgetTool = tools.singleWhere(
+            (t) =>
+                t.name ==
+                DartToolingDaemonSupport.highlightDevToolsWidgetTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(
+              name: highlightWidgetTool.name,
+              arguments: {'widgetId': 'widget123', 'screenId': 'inspector'},
+            ),
+          );
+
+          expect(result.isError, isNot(true));
+          expect(
+            (result.content.first as TextContent).text,
+            contains(
+              'Successfully highlighted widget "widget123" in DevTools.',
+            ),
+          );
+        });
+
+        test('can capture devtools screenshot', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService('DartDevTools', 'captureScreenshot', (
+            params,
+          ) async {
+            return {
+              'type': 'Success',
+              'rawImage': [1, 2, 3, 4],
+            };
+          });
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final screenshotTool = tools.singleWhere(
+            (t) =>
+                t.name == DartToolingDaemonSupport.devtoolsScreenshotTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(
+              name: screenshotTool.name,
+              arguments: {'screenId': 'inspector'},
+            ),
+          );
+
+          expect(result.isError, isNot(true));
+          final content = result.content.first as ImageContent;
+          expect(content.mimeType, 'image/png');
+          expect(content.data, base64Encode([1, 2, 3, 4]));
+        });
+
+        test('can get devtools screens', () async {
+          final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+          // Register a fake DartDevTools service
+          await dtdClient.registerService(
+            'DartDevTools',
+            'getVisibleScreens',
+            (params) async {
+              return {
+                'type': 'Success',
+                'screens': ['inspector', 'debugger', 'memory'],
+              };
+            },
+          );
+
+          final tools =
+              (await testHarness.mcpServerConnection.listTools()).tools;
+          final screensTool = tools.singleWhere(
+            (t) => t.name == DartToolingDaemonSupport.devToolsScreensTool.name,
+          );
+          final result = await testHarness.callToolWithRetry(
+            CallToolRequest(name: screensTool.name, arguments: {}),
+          );
+
+          expect(result.isError, isNot(true));
+          final content = result.content.first as TextContent;
+          final screens = (jsonDecode(content.text) as List).cast<String>();
+          expect(screens, containsAll(['inspector', 'debugger', 'memory']));
+        });
+
         Future<String> getSamplingServiceName(
           DartToolingDaemon dtdClient,
         ) async {
@@ -347,6 +503,95 @@ void main() {
         });
       });
 
+      test('can capture performance snapshot', () async {
+        final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+        // Register fake DartDevTools services
+        await dtdClient.registerService('DartDevTools', 'getVisibleScreens', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'screens': ['performance'],
+          };
+        });
+
+        await dtdClient.registerService('DartDevTools', 'switchScreen', (
+          params,
+        ) async {
+          return {'type': 'Success', 'screenId': params['screenId'].asString};
+        });
+
+        await dtdClient.registerService('DartDevTools', 'captureScreenshot', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'rawImage': [1, 2, 3, 4],
+          };
+        });
+
+        final tools = (await testHarness.mcpServerConnection.listTools()).tools;
+        final captureTool = tools.singleWhere(
+          (t) =>
+              t.name ==
+              DartToolingDaemonSupport.capturePerformanceSnapshotTool.name,
+        );
+
+        final result = await testHarness.callToolWithRetry(
+          CallToolRequest(name: captureTool.name),
+        );
+
+        expect(result.isError, isNot(true));
+        final content = result.content.first as ImageContent;
+        expect(content.mimeType, 'image/png');
+        expect(content.data, base64Encode([1, 2, 3, 4]));
+      });
+
+      test('can read performance snapshot resource', () async {
+        final dtdClient = testHarness.fakeEditorExtension!.dtd;
+
+        // Register fake DartDevTools services
+        await dtdClient.registerService('DartDevTools', 'getVisibleScreens', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'screens': ['performance'],
+          };
+        });
+
+        await dtdClient.registerService('DartDevTools', 'switchScreen', (
+          params,
+        ) async {
+          return {'type': 'Success', 'screenId': params['screenId'].asString};
+        });
+
+        await dtdClient.registerService('DartDevTools', 'captureScreenshot', (
+          params,
+        ) async {
+          return {
+            'type': 'Success',
+            'rawImage': [1, 2, 3, 4],
+          };
+        });
+
+        final resources =
+            (await testHarness.mcpServerConnection.listResources()).resources;
+        final snapshotResource = resources.singleWhere(
+          (r) => r.uri == ResourceNames.performanceSnapshot,
+        );
+
+        final result = await testHarness.mcpServerConnection.readResource(
+          ReadResourceRequest(uri: snapshotResource.uri),
+        );
+
+        final content = result.contents.first as BlobResourceContents;
+        expect(content.mimeType, 'image/png');
+        expect(content.blob, base64Encode([1, 2, 3, 4]));
+      });
+
+
       group('dart cli tests', () {
         test('can perform a hot reload', () async {
           final exampleApp = await Directory.systemTemp.createTemp('dart_app');
@@ -541,6 +786,68 @@ void main() {
         });
       });
 
+      test('can record frames via tool', () async {
+        final vmService = FakeVmService();
+        server.activeVmServices['ws://fake'] = Future.value(vmService);
+
+        final tools = (await testHarness.mcpServerConnection.listTools()).tools;
+        final recordFramesTool = tools.singleWhere(
+          (t) => t.name == ToolNames.recordFrames.name,
+        );
+
+        testHarness.mcpClient.registerElicitationHandler((request) async {
+          // Simulate frame events before accepting.
+          vmService.emitFrameEvent({'data': 'frame1'});
+          vmService.emitFrameEvent({'data': 'frame2'});
+          return ElicitResult(action: ElicitationAction.accept);
+        });
+
+        final result = await testHarness.mcpServerConnection.callTool(
+          CallToolRequest(
+            name: recordFramesTool.name,
+            arguments: {'uri': 'ws://fake'},
+          ),
+        );
+        final content = result.content.first as TextContent;
+        final frames = (jsonDecode(content.text) as List)
+            .cast<Map<String, Object?>>();
+
+        expect(frames, [
+          {'data': 'frame1'},
+          {'data': 'frame2'},
+        ]);
+      });
+
+      test('can record frames via resource (wraps tool)', () async {
+        final vmService = FakeVmService();
+        server.activeVmServices['ws://fake'] = Future.value(vmService);
+
+        final resources =
+            (await testHarness.mcpServerConnection.listResources()).resources;
+        final recordFramesResource = resources.singleWhere(
+          (r) => r.uri == ResourceNames.recordFrames,
+        );
+
+        testHarness.mcpClient.registerElicitationHandler((request) async {
+          // Simulate frame events before accepting.
+          vmService.emitFrameEvent({'data': 'frame1'});
+          vmService.emitFrameEvent({'data': 'frame2'});
+          return ElicitResult(action: ElicitationAction.accept);
+        });
+
+        final result = await testHarness.mcpServerConnection.readResource(
+          ReadResourceRequest(uri: recordFramesResource.uri),
+        );
+        final content = result.contents.first as TextResourceContents;
+        final frames = (jsonDecode(content.text) as List)
+            .cast<Map<String, Object?>>();
+
+        expect(frames, [
+          {'data': 'frame1'},
+          {'data': 'frame2'},
+        ]);
+      });
+
       test('can take a screenshot', () async {
         await testHarness.startDebugSession(
           counterAppPath,
@@ -580,76 +887,7 @@ void main() {
         });
       });
 
-      group('get selected widget', () {
-        test('when a selected widget exists', () async {
-          final server = testHarness.serverConnectionPair.server!;
 
-          await testHarness.startDebugSession(
-            counterAppPath,
-            'lib/main.dart',
-            isFlutter: true,
-          );
-          await server.updateActiveVmServices();
-
-          final getWidgetTreeResult = await testHarness.callToolWithRetry(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getWidgetTreeTool.name,
-              arguments: {'summaryOnly': true},
-            ),
-          );
-
-          // Select the first child of the [root] widget.
-          final widgetTree =
-              jsonDecode(
-                    (getWidgetTreeResult.content.first as TextContent).text,
-                  )
-                  as Map<String, Object?>;
-          final children = widgetTree['children'] as List<Object?>;
-          final firstWidgetId =
-              (children.first as Map<String, Object?>)['valueId'];
-          final appVmService = await server.activeVmServices.values.first;
-          final vm = await appVmService.getVM();
-          await appVmService.callServiceExtension(
-            'ext.flutter.inspector.setSelectionById',
-            isolateId: vm.isolates!.first.id,
-            args: {
-              'objectGroup': DartToolingDaemonSupport.inspectorObjectGroup,
-              'arg': firstWidgetId,
-            },
-          );
-
-          // Confirm we can get the selected widget from the MCP tool.
-          final getSelectedWidgetResult = await testHarness.callTool(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getSelectedWidgetTool.name,
-            ),
-          );
-          expect(getSelectedWidgetResult.isError, isNot(true));
-          expect(
-            (getSelectedWidgetResult.content.first as TextContent).text,
-            contains('MyApp'),
-          );
-        });
-
-        test('when there is no selected widget', () async {
-          await testHarness.startDebugSession(
-            counterAppPath,
-            'lib/main.dart',
-            isFlutter: true,
-          );
-          final getSelectedWidgetResult = await testHarness.callToolWithRetry(
-            CallToolRequest(
-              name: DartToolingDaemonSupport.getSelectedWidgetTool.name,
-            ),
-          );
-
-          expect(getSelectedWidgetResult.isError, isNot(true));
-          expect(
-            (getSelectedWidgetResult.content.first as TextContent).text,
-            contains('No Widget selected.'),
-          );
-        });
-      });
 
       group('runtime errors', () {
         final errorCountRegex = RegExp(r'Found \d+ errors?:');
@@ -1181,6 +1419,8 @@ void action() {
 }
 ''';
 
+
+
 /// Tries to delete [dir] up to 5 times, waiting 200ms between each.
 ///
 /// Necessary for windows tests.
@@ -1193,5 +1433,31 @@ Future<void> _deleteWithRetry(Directory dir) async {
     } catch (_) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
+  }
+}
+
+class FakeVmService implements VmService {
+  final _extensionController = StreamController<Event>.broadcast();
+
+  @override
+  Stream<Event> get onExtensionEvent => _extensionController.stream;
+
+  void emitFrameEvent(Map<String, Object?> data) {
+    _extensionController.add(
+      Event(
+        kind: 'Flutter.Frame',
+        extensionKind: 'Flutter.Frame',
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        extensionData: ExtensionData.parse(data),
+      ),
+    );
+  }
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    return super.noSuchMethod(invocation);
   }
 }

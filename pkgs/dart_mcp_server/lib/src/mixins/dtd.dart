@@ -38,7 +38,7 @@ extension McpServiceConstants on Never {
 ///
 /// The MCPServer must already have the [ToolsSupport] mixin applied.
 base mixin DartToolingDaemonSupport
-    on ToolsSupport, LoggingSupport, ResourcesSupport
+    on ToolsSupport, LoggingSupport, ResourcesSupport, ElicitationRequestSupport
     implements AnalyticsSupport {
   DartToolingDaemon? _dtd;
 
@@ -200,9 +200,35 @@ base mixin DartToolingDaemonSupport
 
     if (enableScreenshots) registerTool(screenshotTool, takeScreenshot);
     registerTool(getWidgetTreeTool, widgetTree);
-    registerTool(getSelectedWidgetTool, selectedWidget);
     registerTool(setWidgetSelectionModeTool, _setWidgetSelectionMode);
     registerTool(flutterDriverTool, _callFlutterDriver);
+    registerTool(switchDevToolsScreenTool, _switchDevToolsScreen);
+    registerTool(highlightDevToolsWidgetTool, _highlightDevToolsWidget);
+    registerTool(devtoolsScreenshotTool, _captureDevToolsScreenshot);
+    registerTool(devToolsScreensTool, _getDevToolsScreens);
+    registerTool(visibleDevToolsWidgetsTool, _getVisibleDevToolsWidgets);
+    registerTool(capturePerformanceSnapshotTool, _capturePerformanceSnapshot);
+    registerTool(recordFramesTool, _recordFramesTool);
+
+    addResource(
+      Resource(
+        uri: ResourceNames.performanceSnapshot,
+        name: 'Performance Snapshot',
+        description: 'A snapshot of the performance screen from DevTools.',
+        mimeType: 'image/png',
+      ),
+      _performanceSnapshot,
+    );
+
+    addResource(
+      Resource(
+        uri: ResourceNames.recordFrames,
+        name: 'Record Frames',
+        description: 'Record frames from the performance screen from DevTools.',
+        mimeType: 'application/json',
+      ),
+      _recordFrames,
+    );
 
     return super.initialize(request);
   }
@@ -216,15 +242,226 @@ base mixin DartToolingDaemonSupport
     hotReloadTool,
     screenshotTool,
     getWidgetTreeTool,
-    getSelectedWidgetTool,
+
     setWidgetSelectionModeTool,
     flutterDriverTool,
+    switchDevToolsScreenTool,
+    highlightDevToolsWidgetTool,
+    devtoolsScreenshotTool,
+    devToolsScreensTool,
+    visibleDevToolsWidgetsTool,
+    capturePerformanceSnapshotTool,
+    recordFramesTool,
   ];
 
   @override
   Future<void> shutdown() async {
     await _resetDtd();
     await super.shutdown();
+  }
+
+  /// Captures a performance snapshot from DevTools.
+  ///
+  /// This tool orchestrates a workflow to capture a performance snapshot:
+  /// 1. Connects to DTD (eliciting URI if needed).
+  /// 2. Elicits user to open DevTools in browser.
+  /// 3. Switches to the performance screen.
+  /// 4. Waits for user interaction (5s).
+  /// 5. Captures a screenshot.
+  Future<CallToolResult> _capturePerformanceSnapshot(
+    CallToolRequest request,
+  ) async {
+    // 1. Connect logic
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    log(
+      LoggingLevel.info,
+      'Please ensure DevTools is open in your browser. You can run "Open DevTools in browser" with the command palette.'
+      'Waiting 10 seconds for you to open it and then will attempt to capture a performance snapshot...',
+    );
+
+    await Future<void>.delayed(const Duration(seconds: 10));
+
+    // 3. Get screens and check for 'performance'
+    final screensResult = await _getDevToolsScreens(request);
+    if (screensResult.isError == true) return screensResult;
+    final screensJson = (screensResult.content.first as TextContent).text;
+    final screens = (jsonDecode(screensJson) as List).cast<String>();
+
+    if (!screens.contains('performance')) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'The "performance" screen is not available. Available screens: $screens. '
+                'Please ensure your app is running and supports the performance screen.',
+          ),
+        ],
+      );
+    }
+
+    // 4. Switch to performance screen
+    final switchResult = await _switchDevToolsScreen(
+      CallToolRequest(
+        name: 'switch_dev_tools_screen',
+        arguments: {'screenId': 'performance'},
+      ),
+    );
+    if (switchResult.isError == true) return switchResult;
+
+    // 5. Wait for user interaction
+
+    log(
+      LoggingLevel.info,
+      'Please interact with your app for the next 5 seconds in a way that causes jank. I will capture a screenshot after 5 seconds.',
+    );
+
+    await Future<void>.delayed(const Duration(seconds: 5));
+
+    // 6. Capture screenshot
+    return _captureDevToolsScreenshot(
+      CallToolRequest(
+        name: 'devtools_screenshot',
+        arguments: {'screenId': 'performance'},
+      ),
+    );
+  }
+
+  Future<ReadResourceResult> _recordFrames(ReadResourceRequest request) async {
+    if (activeVmServices.isEmpty) {
+      await updateActiveVmServices();
+    }
+    if (activeVmServices.isEmpty) {
+      throw Exception('No active VM services found.');
+    }
+
+    final uri = activeVmServices.keys.first;
+
+    final result = await _recordFramesTool(uri);
+
+    if (result.isError == true) {
+      throw Exception(
+        result.content.map((c) => (c as TextContent).text).join('\n'),
+      );
+    }
+
+    return ReadResourceResult(
+      contents: [
+        TextResourceContents(
+          uri: request.uri,
+          text: (result.content.first as TextContent).text,
+        ),
+      ],
+    );
+  }
+
+  Future<CallToolResult> _recordFramesTool(CallToolRequest request) async {
+    final uri = request.arguments?['uri'] as String?;
+    if (uri == null) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Missing required argument "uri".')],
+      );
+    }
+
+    final vmServiceUri = uri;
+
+    var vmServiceFuture = activeVmServices[vmServiceUri];
+    if (activeVmServices.isEmpty || vmServiceFuture == null) {
+      vmServiceFuture = activeVmServices[vmServiceUri] = vmServiceConnectUri(
+        vmServiceUri,
+      );
+
+      // await updateActiveVmServices();
+    }
+
+    vmServiceFuture = activeVmServices[vmServiceUri];
+    if (vmServiceFuture == null) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'No active VM service found for uri: $vmServiceUri. Please make sure the app is running.',
+          ),
+        ],
+      );
+    }
+
+    final vmService = await vmServiceFuture;
+
+    final progressToken = request.meta?.progressToken;
+    final meta = progressToken != null
+        ? MetaWithProgressToken(progressToken: progressToken)
+        : null;
+
+    // 2. Wait for user to be ready to record.
+    await elicit(
+      ElicitRequest(
+        message:
+            'Ready to record frames. Please prepare your app to reproduce the issue, and submit this form when you are ready to start recording.',
+        requestedSchema: ObjectSchema(),
+      ),
+    );
+
+    // 3. Start recording Flutter frames.
+    final frames = <Map<String, Object?>>[];
+    final subscription = vmService.onExtensionEvent.listen((event) {
+      if (event.extensionKind == 'Flutter.Frame') {
+        final data = event.extensionData?.data;
+        if (data != null) {
+          frames.add(data);
+        }
+      }
+    });
+
+    try {
+      // 4. Elicit user response to stop recording.
+      await elicit(
+        ElicitRequest(
+          message:
+              'Recording frames. Reproduce the issue and let me know when you are done by submitting this form.',
+          requestedSchema: ObjectSchema(),
+        ),
+      );
+    } finally {
+      await subscription.cancel();
+    }
+
+    return CallToolResult(content: [TextContent(text: jsonEncode(frames))]);
+  }
+
+  Future<ReadResourceResult> _performanceSnapshot(
+    ReadResourceRequest request,
+  ) async {
+    final result = await _capturePerformanceSnapshot(
+      CallToolRequest(
+        name: ToolNames.capturePerformanceSnapshot.name,
+        arguments: {},
+      ),
+    );
+
+    if (result.isError == true) {
+      throw Exception(
+        result.content.map((c) => (c as TextContent).text).join('\n'),
+      );
+    }
+
+    final content = result.content.first;
+    if (content is ImageContent) {
+      return ReadResourceResult(
+        contents: [
+          BlobResourceContents(
+            uri: request.uri,
+            mimeType: 'image/png',
+            blob: content.data,
+          ),
+        ],
+      );
+    }
+    throw Exception('Unexpected content type from performance snapshot');
   }
 
   Future<CallToolResult> _callFlutterDriver(CallToolRequest request) async {
@@ -327,6 +564,271 @@ base mixin DartToolingDaemonSupport
       return CallToolResult(
         isError: true,
         content: [Content.text(text: 'Connection failed: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Switches the DevTools screen to the specified [screenId].
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _switchDevToolsScreen(CallToolRequest request) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final screenId = request.arguments!['screenId'] as String;
+
+    try {
+      await dtd.call(
+        'DartDevTools',
+        'switchScreen',
+        params: {'screenId': screenId},
+      );
+      return CallToolResult(
+        content: [
+          TextContent(
+            text: 'Successfully switched DevTools screen to "$screenId".',
+          ),
+        ],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.switchScreen" service is not available. '
+                  'Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to switch DevTools screen: ${e.message}'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Failed to switch DevTools screen: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Highlights a specific widget in Dart DevTools.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _highlightDevToolsWidget(
+    CallToolRequest request,
+  ) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final widgetId = request.arguments!['widgetId'] as String;
+    final screenId = request.arguments!['screenId'] as String;
+    try {
+      await dtd.call(
+        'DartDevTools',
+        'highlightWidget',
+        params: {'screenId': screenId, 'widgetId': widgetId},
+      );
+      return CallToolResult(
+        content: [
+          TextContent(
+            text: 'Successfully highlighted widget "$widgetId" in DevTools.',
+          ),
+        ],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.highlightWidget" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to highlight widget: ${e.message}'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Failed to highlight widget: $e')],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Retrieves the list of currently visible widget IDs from Dart DevTools.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _getVisibleDevToolsWidgets(
+    CallToolRequest request,
+  ) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final screenId = request.arguments?['screenId'] as String?;
+
+    try {
+      final result = await dtd.call(
+        'DartDevTools',
+        'getVisibleWidgets',
+        params: {if (screenId != null) 'screenId': screenId},
+      );
+      final widgetIds =
+          (result.result['widgets'] as List?)?.cast<String>() ?? [];
+      return CallToolResult(
+        content: [TextContent(text: jsonEncode(widgetIds))],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.getVisibleWidgets" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text: 'Failed to get visible DevTools widgets: ${e.message}',
+          ),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to get visible DevTools widgets: $e'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Captures a screenshot of Dart DevTools.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _captureDevToolsScreenshot(
+    CallToolRequest request,
+  ) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    final screenId = request.arguments?['screenId'] as String?;
+
+    try {
+      final result = await dtd.call(
+        'DartDevTools',
+        'captureScreenshot',
+        params: {if (screenId != null) 'screenId': screenId},
+      );
+      final rawImage = (result.result['rawImage'] as List?)?.cast<int>();
+      if (rawImage == null) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text: 'Failed to capture DevTools screenshot: rawImage is null',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.unhandledError;
+      }
+
+      return CallToolResult(
+        content: [
+          ImageContent(data: base64Encode(rawImage), mimeType: 'image/png'),
+        ],
+      );
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.captureScreenshot" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text: 'Failed to capture DevTools screenshot: ${e.message}',
+          ),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to capture DevTools screenshot: $e'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    }
+  }
+
+  /// Retrieves the list of available DevTools screens.
+  ///
+  /// This requires the Dart DevTools to be connected to DTD and to have
+  /// registered the `DartDevTools` service.
+  Future<CallToolResult> _getDevToolsScreens(CallToolRequest request) async {
+    final dtd = _dtd;
+    if (dtd == null) return _dtdNotConnected;
+
+    try {
+      final result = await dtd.call(
+        'DartDevTools',
+        'getVisibleScreens',
+        params: {},
+      );
+      final screens = (result.result['screens'] as List?)?.cast<String>() ?? [];
+      return CallToolResult(content: [TextContent(text: jsonEncode(screens))]);
+    } on RpcException catch (e) {
+      if (e.code == RpcErrorCodes.kMethodNotFound) {
+        return CallToolResult(
+          isError: true,
+          content: [
+            TextContent(
+              text:
+                  'The "DartDevTools.getVisibleScreens" service is not '
+                  'available. Please make sure DevTools is connected to DTD.',
+            ),
+          ],
+        )..failureReason = CallToolFailureReason.methodNotFound;
+      }
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(text: 'Failed to get DevTools screens: ${e.message}'),
+        ],
+      )..failureReason = CallToolFailureReason.unhandledError;
+    } catch (e) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Failed to get DevTools screens: $e')],
       )..failureReason = CallToolFailureReason.unhandledError;
     }
   }
@@ -642,42 +1144,6 @@ base mixin DartToolingDaemonSupport
                 text: 'Unknown error or bad response getting widget tree:\n$e',
               ),
             ],
-          )..failureReason = CallToolFailureReason.unhandledError;
-        }
-      },
-    );
-  }
-
-  /// Retrieves the selected widget from the currently running app.
-  ///
-  /// If more than one debug session is active, then it just uses the first one.
-  // TODO: support passing a debug session id when there is more than one debug
-  // session.
-  Future<CallToolResult> selectedWidget(CallToolRequest request) async {
-    return _callOnVmService(
-      callback: (vmService) async {
-        final vm = await vmService.getVM();
-        final isolateId = vm.isolates!.first.id;
-        try {
-          final result = await vmService.callServiceExtension(
-            '$_inspectorServiceExtensionPrefix.getSelectedSummaryWidget',
-            isolateId: isolateId,
-            args: {'objectGroup': inspectorObjectGroup},
-          );
-
-          final widget = result.json?['result'];
-          if (widget == null) {
-            return CallToolResult(
-              content: [TextContent(text: 'No Widget selected.')],
-            );
-          }
-          return CallToolResult(
-            content: [TextContent(text: jsonEncode(widget))],
-          );
-        } catch (e) {
-          return CallToolResult(
-            isError: true,
-            content: [TextContent(text: 'Failed to get selected widget: $e')],
           )..failureReason = CallToolFailureReason.unhandledError;
         }
       },
@@ -1103,18 +1569,6 @@ base mixin DartToolingDaemonSupport
   )..categories = [FeatureCategory.flutter];
 
   @visibleForTesting
-  static final getSelectedWidgetTool = Tool(
-    name: ToolNames.getSelectedWidget.name,
-    description:
-        'Retrieves the selected widget from the active Flutter application. '
-        'Requires "${connectTool.name}" to be successfully called first.',
-    annotations: ToolAnnotations(
-      title: 'Get selected widget',
-      readOnlyHint: true,
-    ),
-    inputSchema: Schema.object(additionalProperties: false),
-  )..categories = [FeatureCategory.flutter, FeatureCategory.widgetInspector];
-
   @visibleForTesting
   static final setWidgetSelectionModeTool = Tool(
     name: ToolNames.setWidgetSelectionMode.name,
@@ -1155,6 +1609,153 @@ base mixin DartToolingDaemonSupport
           FeatureCategory.flutter,
           FeatureCategory.analysis,
         ];
+
+  @visibleForTesting
+  static final switchDevToolsScreenTool = Tool(
+    name: ToolNames.switchDevToolsScreen.name,
+    description:
+        'Switches the DevTools screen to the specified screenId. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Switch DevTools Screen',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'screenId': Schema.string(
+          description: 'The ID of the DevTools screen to switch to.',
+          enumValues: ['debugger', 'inspector', 'memory'],
+        ),
+      },
+      required: const ['screenId'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final highlightDevToolsWidgetTool = Tool(
+    name: ToolNames.highlightDevToolsWidget.name,
+    description:
+        'Highlights a specific widget in Dart DevTools. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Highlight DevTools Widget',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'widgetId': Schema.string(
+          description: 'The ID of the widget to highlight.',
+        ),
+        'screenId': Schema.string(
+          description:
+              'The ID of the DevTools screen to highlight the widget on.',
+        ),
+      },
+      required: const ['widgetId', 'screenId'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final devtoolsScreenshotTool = Tool(
+    name: ToolNames.devtoolsScreenshot.name,
+    description:
+        'Captures a screenshot of the current Dart DevTools screen. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Capture DevTools Screenshot',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'screenId': Schema.string(
+          description:
+              'The ID of the DevTools screen to capture. '
+              'If not provided, the current screen is captured.',
+        ),
+      },
+
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final devToolsScreensTool = Tool(
+    name: ToolNames.devToolsScreens.name,
+    description:
+        'Retrieves a list of available DevTools screens. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Get DevTools Screens',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(additionalProperties: false),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final visibleDevToolsWidgetsTool = Tool(
+    name: ToolNames.visibleDevToolsWidgets.name,
+    description:
+        'Retrieves a list of currently visible widget IDs from Dart DevTools. '
+        'Requires "${connectTool.name}" to be successfully called first.',
+    annotations: ToolAnnotations(
+      title: 'Get visible DevTools widgets',
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'screenId': Schema.string(
+          description:
+              'The ID of the DevTools screen to capture. '
+              'If not provided, the current screen is captured.',
+        ),
+      },
+
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final capturePerformanceSnapshotTool = Tool(
+    name: ToolNames.capturePerformanceSnapshot.name,
+    description:
+        'Captures a performance snapshot from DevTools. '
+        'This tool should be used when users ask about jank or performance issues with their app. '
+        'This tool orchestrates a workflow to capture a performance snapshot: '
+        '1. Connects to DTD (fails if not connected). '
+        '2. Waits 10s for user to open DevTools. '
+        '3. Switches to the performance screen. '
+        '4. Captures a screenshot.',
+    annotations: ToolAnnotations(
+      title: 'Capture Performance Snapshot',
+      destructiveHint: false,
+      readOnlyHint: false,
+    ),
+    inputSchema: Schema.object(additionalProperties: false),
+  )..categories = [FeatureCategory.dart, FeatureCategory.flutter];
+
+  @visibleForTesting
+  static final recordFramesTool = Tool(
+    name: ToolNames.recordFrames.name,
+    description:
+        'Records Flutter frames for a specified app to help diagnose performance issues or reproduce a bug.',
+    annotations: ToolAnnotations(
+      title: 'Record Flutter Frames',
+      destructiveHint: false,
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'uri': Schema.string(
+          description:
+              'The VM service URI of the application to record frames for.',
+        ),
+      },
+      required: ['uri'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.flutter];
 
   static final _connectedAppsNotSupported = CallToolResult(
     isError: true,

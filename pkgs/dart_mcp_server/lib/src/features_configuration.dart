@@ -35,6 +35,9 @@ enum FeatureCategory {
   /// Features for interacting with running apps via the Dart Tooling Daemon.
   dartToolingDaemon(all, 'dart_tooling_daemon'),
 
+  /// Features for interacting with the DevTools performance screen.
+  // performance(dartToolingDaemon, 'performance'),
+
   /// Features for interacting with package dependencies, pub and/or pub.dev
   packageDeps(all, 'package_deps');
 
