@@ -15,6 +15,7 @@ import 'package:meta/meta.dart';
 import 'package:unified_analytics/unified_analytics.dart' as ua;
 import 'package:vm_service/vm_service.dart';
 import 'package:vm_service/vm_service_io.dart';
+import 'package:vm_service_protos/vm_service_protos.dart';
 import 'package:web_socket/web_socket.dart';
 
 import '../features_configuration.dart';
@@ -23,7 +24,6 @@ import '../utils/names.dart';
 import '../utils/process_manager.dart';
 import '../utils/sdk.dart';
 import '../utils/uuid.dart';
-import 'package:vm_service_protos/vm_service_protos.dart';
 
 /// Constants used by the MCP server to register services on DTD.
 ///
@@ -296,14 +296,11 @@ base mixin DartToolingDaemonSupport
     }
 
     final vmServiceUri = uri;
-
     var vmServiceFuture = activeVmServices[vmServiceUri];
     if (activeVmServices.isEmpty || vmServiceFuture == null) {
       vmServiceFuture = activeVmServices[vmServiceUri] = vmServiceConnectUri(
         vmServiceUri,
       );
-
-      // await updateActiveVmServices();
     }
 
     vmServiceFuture = activeVmServices[vmServiceUri];
@@ -325,7 +322,6 @@ base mixin DartToolingDaemonSupport
     // Ensure we are subscribed to the extension stream to receive events.
     try {
       await vmService.streamListen(EventStreams.kExtension);
-      await vmService.streamListen(EventStreams.kTimeline);
     } on RPCError catch (e) {
       if (e.code != RPCErrorKind.kStreamAlreadySubscribed.code) {
         rethrow;
@@ -364,7 +360,6 @@ base mixin DartToolingDaemonSupport
 
     // 3. Start recording Flutter frames.
     final frames = <Map<String, Object?>>[];
-    final timelineEvents = <Map<String, Object?>>[];
     final subscription = vmService.onExtensionEvent.listen((event) {
       debugLog('VM service event: ${event.extensionKind}');
       if (event.extensionKind == 'Flutter.Frame') {
@@ -372,34 +367,6 @@ base mixin DartToolingDaemonSupport
         final data = event.extensionData?.data;
         if (data != null) {
           frames.add(data);
-        }
-      }
-    });
-
-    try {
-      await vmService.setVMTimelineFlags(['Dart', 'Embedder']);
-    } catch (e) {
-      debugLog('Could not set VM timeline flags: $e');
-    }
-
-    final timelineSubscription = vmService.onTimelineEvent.listen((event) {
-      if (event.kind == EventKind.kTimelineEvents) {
-        final events = event.timelineEvents;
-        if (events != null) {
-          for (final timelineEvent in events) {
-            final json = timelineEvent.json;
-            if (json != null) {
-              final name = json['name'];
-              final category = json['cat'];
-              final phase = json['ph'];
-              final args = json['args'];
-
-              // debugLog(
-              //   'Timeline Event: $name ($category, phase: $phase) args: $args',
-              // );
-              timelineEvents.add(json);
-            }
-          }
         }
       }
     });
@@ -416,17 +383,9 @@ base mixin DartToolingDaemonSupport
       );
     } finally {
       await subscription.cancel();
-      await timelineSubscription.cancel();
     }
 
     final endVmTime = await vmService.getVMTimelineMicros();
-
-    final rawPerfettoTimeline = await vmService.getPerfettoVMTimeline(
-      timeOriginMicros: currentVmTime.timestamp!,
-      timeExtentMicros: endVmTime.timestamp! - currentVmTime.timestamp!,
-    );
-
-    final trace = rawPerfettoTimeline.trace;
 
     double fps = 60.0;
     try {
@@ -444,44 +403,101 @@ base mixin DartToolingDaemonSupport
     }
     debugLog('FPS IS $fps');
 
+    final rawPerfettoTimeline = await vmService.getPerfettoVMTimeline(
+      timeOriginMicros: currentVmTime.timestamp!,
+      timeExtentMicros: endVmTime.timestamp! - currentVmTime.timestamp!,
+    );
+
+    final trace = rawPerfettoTimeline.trace;
+    final filteredTrace = Trace.fromBuffer(base64Decode(trace!));
+    final trackEvents = filteredTrace.packet.where(
+      (packet) => packet.hasTrackEvent(),
+    );
+    debugLog('Track events: ${trackEvents.length}');
+    for (final trackEvent in trackEvents) {
+      final event = trackEvent.trackEvent;
+      print(event);
+      final debugAnnotations = event.debugAnnotations;
+
+      print(
+        'TRACK EVENT: ${trackEvent.trackEvent.name} / ${trackEvent.trackEvent.type}',
+      );
+    }
+
     // debugLog('Raw perfetto timeline: ${rawPerfettoTimeline.toString()}');
 
-    final jankyFrames = frames
-        .where(
-          (frame) => isJanky(
-            fps,
-            rasterTime: Duration(
-              microseconds: frame['raster'] as int,
-            ).inMilliseconds,
-            buildTime: Duration(
-              microseconds: frame['build'] as int,
-            ).inMilliseconds,
-          ),
-        )
-        .toList();
+    final framesWithJanky = frames.map((frame) {
+      final janky = isJanky(
+        fps,
+        rasterTime: Duration(
+          microseconds: frame['raster'] as int,
+        ).inMilliseconds,
+        buildTime: Duration(microseconds: frame['build'] as int).inMilliseconds,
+      );
+      return <String, Object?>{...frame, 'isJanky': janky};
+    }).toList();
+
+    final filteredFramesIndices = <int>{};
+    for (var i = 0; i < framesWithJanky.length; i++) {
+      if (framesWithJanky[i]['isJanky'] == true) {
+        if (i > 0) filteredFramesIndices.add(i - 1);
+        filteredFramesIndices.add(i);
+        if (i < framesWithJanky.length - 1) filteredFramesIndices.add(i + 1);
+      }
+    }
+
+    final filteredFramesIndexList = filteredFramesIndices.toList()..sort();
+    // final filteredFrames = filteredFramesIndexList
+    //     .map((i) => framesWithJanky[i])
+    //     .toList();
+
+    final trackEventsByFrame = <int, List<Object?>>{};
+    for (final packet in trackEvents) {
+      final event = packet.trackEvent;
+      int? frameNumber;
+
+      if (event.hasTrackUuid()) {
+        // Top-level trackUuid property (typically what's used for this data point)
+        frameNumber = event.trackUuid.toInt();
+      } else {
+        // Fallback if it's placed inside a DebugAnnotation
+        for (final annotation in event.debugAnnotations) {
+          if (annotation.name == 'trackUuid') {
+            if (annotation.hasStringValue()) {
+              frameNumber = int.tryParse(annotation.stringValue);
+            }
+          }
+        }
+      }
+
+      if (frameNumber != null) {
+        trackEventsByFrame
+            .putIfAbsent(frameNumber, () => [])
+            .add(event.toProto3Json());
+      }
+    }
+
+    final filteredFrames = filteredFramesIndexList.map((i) {
+      final frame = framesWithJanky[i];
+      final frameNumber = frame['number'] as int?;
+      return <String, Object?>{
+        ...frame,
+        'trackEvents': frameNumber != null
+            ? trackEventsByFrame[frameNumber] ?? []
+            : [],
+      };
+    }).toList();
 
     debugLog('Recorded ${frames.length} frames.');
-    debugLog('Janky frames: ${jankyFrames.length}');
-
-    final jankyFrameIds = jankyFrames.map((frame) => frame['number']).toList();
-    debugLog('Iterating through timeline events: ${timelineEvents.length}');
-
-    final filteredTimelineEvents = timelineEvents.where((event) {
-      debugLog('timeline event: $event');
-      final args = event['args'];
-      debugLog('args: $args');
-      return args is Map<String, Object?> &&
-          jankyFrameIds.contains(args['frame_number']);
-    }).toList();
+    debugLog('Filtered frames: ${filteredFrames.length}');
 
     return CallToolResult(
       content: [
         TextContent(
           text: jsonEncode({
-            'frames': jankyFrames,
+            'filtered_frames': filteredFrames,
             'fps': fps,
-            'frames_count': frames.length,
-            'janky_frames_count': filteredTimelineEvents.length,
+            'total_frames_count': frames.length,
           }),
         ),
       ],
