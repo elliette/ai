@@ -4,6 +4,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:collection/collection.dart';
 import 'package:dart_mcp/server.dart';
@@ -22,6 +23,7 @@ import '../utils/names.dart';
 import '../utils/process_manager.dart';
 import '../utils/sdk.dart';
 import '../utils/uuid.dart';
+import 'package:vm_service_protos/vm_service_protos.dart';
 
 /// Constants used by the MCP server to register services on DTD.
 ///
@@ -41,7 +43,12 @@ extension McpServiceConstants on Never {
 ///
 /// The MCPServer must already have the [ToolsSupport] mixin applied.
 base mixin DartToolingDaemonSupport
-    on ToolsSupport, LoggingSupport, ResourcesSupport, SdkSupport
+    on
+        ToolsSupport,
+        LoggingSupport,
+        ResourcesSupport,
+        SdkSupport,
+        ElicitationRequestSupport
     implements AnalyticsSupport, ProcessManagerSupport {
   /// The DTD instances that this server is connected to.
   final List<DartToolingDaemon> _dtds = [];
@@ -197,6 +204,7 @@ base mixin DartToolingDaemonSupport
     registerTool(hotReloadTool, hotReload);
     registerTool(widgetInspectorTool, _widgetInspector);
     registerTool(flutterDriverTool, _callFlutterDriver);
+    registerTool(recordFramesTool, _recordFrames);
 
     return super.initialize(request);
   }
@@ -210,6 +218,7 @@ base mixin DartToolingDaemonSupport
     hotReloadTool,
     widgetInspectorTool,
     flutterDriverTool,
+    recordFramesTool,
   ];
 
   @override
@@ -274,6 +283,208 @@ base mixin DartToolingDaemonSupport
           isError: result.json?['isError'] as bool?,
         );
       },
+    );
+  }
+
+  Future<CallToolResult> _recordFrames(CallToolRequest request) async {
+    final uri = request.arguments?['uri'] as String?;
+    if (uri == null) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Missing required argument "uri".')],
+      );
+    }
+
+    final vmServiceUri = uri;
+
+    var vmServiceFuture = activeVmServices[vmServiceUri];
+    if (activeVmServices.isEmpty || vmServiceFuture == null) {
+      vmServiceFuture = activeVmServices[vmServiceUri] = vmServiceConnectUri(
+        vmServiceUri,
+      );
+
+      // await updateActiveVmServices();
+    }
+
+    vmServiceFuture = activeVmServices[vmServiceUri];
+    if (vmServiceFuture == null) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'No active VM service found for uri: $vmServiceUri. Please make sure the app is running.',
+          ),
+        ],
+      );
+    }
+
+    final vmService = await vmServiceFuture;
+    debugLog('VM service connected: ${vmService.wsUri}');
+
+    // Ensure we are subscribed to the extension stream to receive events.
+    try {
+      await vmService.streamListen(EventStreams.kExtension);
+      await vmService.streamListen(EventStreams.kTimeline);
+    } on RPCError catch (e) {
+      if (e.code != RPCErrorKind.kStreamAlreadySubscribed.code) {
+        rethrow;
+      }
+    }
+
+    try {
+      final vm = await vmService.getVM();
+      if (vm.isolates?.isNotEmpty == true) {
+        await vmService.callServiceExtension(
+          'ext.flutter.profileWidgetBuilds',
+          isolateId: vm.isolates!.first.id,
+          args: {'enabled': true},
+        );
+      }
+    } catch (e) {
+      debugLog('Could not enable ext.flutter.profileWidgetBuilds: $e');
+    }
+
+    final progressToken = request.meta?.progressToken;
+    final meta = progressToken != null
+        ? MetaWithProgressToken(progressToken: progressToken)
+        : null;
+
+    // 2. Wait for user to be ready to record.
+    await elicit(
+      ElicitRequest.form(
+        message:
+            'Ready to record frames. Please prepare your app to reproduce the issue, and submit this form when you are ready to start recording.',
+        requestedSchema: ObjectSchema(properties: {}),
+        meta: meta,
+      ),
+    );
+
+    final currentVmTime = await vmService.getVMTimelineMicros();
+
+    // 3. Start recording Flutter frames.
+    final frames = <Map<String, Object?>>[];
+    final timelineEvents = <Map<String, Object?>>[];
+    final subscription = vmService.onExtensionEvent.listen((event) {
+      debugLog('VM service event: ${event.extensionKind}');
+      if (event.extensionKind == 'Flutter.Frame') {
+        debugLog('Flutter.Frame event: ${event.extensionData?.data}');
+        final data = event.extensionData?.data;
+        if (data != null) {
+          frames.add(data);
+        }
+      }
+    });
+
+    try {
+      await vmService.setVMTimelineFlags(['Dart', 'Embedder']);
+    } catch (e) {
+      debugLog('Could not set VM timeline flags: $e');
+    }
+
+    final timelineSubscription = vmService.onTimelineEvent.listen((event) {
+      if (event.kind == EventKind.kTimelineEvents) {
+        final events = event.timelineEvents;
+        if (events != null) {
+          for (final timelineEvent in events) {
+            final json = timelineEvent.json;
+            if (json != null) {
+              final name = json['name'];
+              final category = json['cat'];
+              final phase = json['ph'];
+              final args = json['args'];
+
+              // debugLog(
+              //   'Timeline Event: $name ($category, phase: $phase) args: $args',
+              // );
+              timelineEvents.add(json);
+            }
+          }
+        }
+      }
+    });
+
+    try {
+      // 4. Elicit user response to stop recording.
+      await elicit(
+        ElicitRequest.form(
+          message:
+              'Recording frames. Reproduce the issue and let me know when you are done by submitting this form.',
+          requestedSchema: ObjectSchema(properties: {}),
+          meta: meta,
+        ),
+      );
+    } finally {
+      await subscription.cancel();
+      await timelineSubscription.cancel();
+    }
+
+    final endVmTime = await vmService.getVMTimelineMicros();
+
+    final rawPerfettoTimeline = await vmService.getPerfettoVMTimeline(
+      timeOriginMicros: currentVmTime.timestamp!,
+      timeExtentMicros: endVmTime.timestamp! - currentVmTime.timestamp!,
+    );
+
+    final trace = rawPerfettoTimeline.trace;
+
+    double fps = 60.0;
+    try {
+      final vm = await vmService.getVM();
+      final isolateId = vm.isolates?.firstOrNull?.id;
+      if (isolateId != null) {
+        final displayRefreshRate = await vmService.callServiceExtension(
+          '_flutter.getDisplayRefreshRate',
+          isolateId: isolateId,
+        );
+        fps = displayRefreshRate.json?['fps'] as double? ?? 60.0;
+      }
+    } catch (e) {
+      debugLog('Could not get display refresh rate: $e');
+    }
+    debugLog('FPS IS $fps');
+
+    // debugLog('Raw perfetto timeline: ${rawPerfettoTimeline.toString()}');
+
+    final jankyFrames = frames
+        .where(
+          (frame) => isJanky(
+            fps,
+            rasterTime: Duration(
+              microseconds: frame['raster'] as int,
+            ).inMilliseconds,
+            buildTime: Duration(
+              microseconds: frame['build'] as int,
+            ).inMilliseconds,
+          ),
+        )
+        .toList();
+
+    debugLog('Recorded ${frames.length} frames.');
+    debugLog('Janky frames: ${jankyFrames.length}');
+
+    final jankyFrameIds = jankyFrames.map((frame) => frame['number']).toList();
+    debugLog('Iterating through timeline events: ${timelineEvents.length}');
+
+    final filteredTimelineEvents = timelineEvents.where((event) {
+      debugLog('timeline event: $event');
+      final args = event['args'];
+      debugLog('args: $args');
+      return args is Map<String, Object?> &&
+          jankyFrameIds.contains(args['frame_number']);
+    }).toList();
+
+    return CallToolResult(
+      content: [
+        TextContent(
+          text: jsonEncode({
+            'frames': jankyFrames,
+            'fps': fps,
+            'frames_count': frames.length,
+            'janky_frames_count': filteredTimelineEvents.length,
+          }),
+        ),
+      ],
     );
   }
 
@@ -1365,6 +1576,28 @@ base mixin DartToolingDaemonSupport
   )..categories = [FeatureCategory.flutter];
 
   @visibleForTesting
+  static final recordFramesTool = Tool(
+    name: ToolNames.recordFrames.name,
+    description:
+        'Records Flutter frames for a specified app to help diagnose performance issues.',
+    annotations: ToolAnnotations(
+      title: 'Record Flutter Frames',
+      destructiveHint: false,
+      readOnlyHint: true,
+    ),
+    inputSchema: Schema.object(
+      properties: {
+        'uri': Schema.string(
+          description:
+              'The VM service URI of the application to record frames for.',
+        ),
+      },
+      required: ['uri'],
+      additionalProperties: false,
+    ),
+  )..categories = [FeatureCategory.flutter];
+
+  @visibleForTesting
   static final widgetInspectorTool = Tool(
     name: ToolNames.widgetInspector.name,
     description:
@@ -1757,4 +1990,29 @@ extension DtdCommand on Never {
   static const connect = 'connect';
   static const disconnect = 'disconnect';
   static const listConnectedApps = 'listConnectedApps';
+}
+
+void debugLog(String message) {
+  stderr.writeln('[DEBUG] $message');
+}
+
+bool isJanky(
+  double displayRefreshRate, {
+  required num buildTime,
+  required num rasterTime,
+}) {
+  return isUiJanky(displayRefreshRate, buildTime) ||
+      isRasterJanky(displayRefreshRate, rasterTime);
+}
+
+bool isUiJanky(double displayRefreshRate, num buildTime) {
+  return buildTime > _targetMsPerFrame(displayRefreshRate);
+}
+
+bool isRasterJanky(double displayRefreshRate, num rasterTime) {
+  return rasterTime > _targetMsPerFrame(displayRefreshRate);
+}
+
+double _targetMsPerFrame(double displayRefreshRate) {
+  return 1 / displayRefreshRate * 1000;
 }

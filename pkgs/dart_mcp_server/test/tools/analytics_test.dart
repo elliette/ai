@@ -129,7 +129,7 @@ void main() {
 
     test('are sent for successful tool calls', () async {
       server.registerTool(
-        Tool(name: 'hello', inputSchema: Schema.object())
+        Tool(name: 'hello', inputSchema: Schema.object(properties: {}))
           ..categories = [FeatureCategory.cli],
         (_) => CallToolResult(content: [Content.text(text: 'world')]),
       );
@@ -160,7 +160,7 @@ void main() {
     test('are sent for failed tool calls', () async {
       analytics.sentEvents.clear();
 
-      final tool = Tool(name: 'hello', inputSchema: Schema.object())
+      final tool = Tool(name: 'hello', inputSchema: Schema.object(properties: {}))
         ..categories = [FeatureCategory.cli];
       server.registerTool(
         tool,

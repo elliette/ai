@@ -221,7 +221,7 @@ base mixin GrepSupport
     final elicitResult = await elicit(
       ElicitRequest.form(
         message: 'Ripgrep is required to run this tool, can I install it?',
-        requestedSchema: Schema.object(),
+        requestedSchema: Schema.object(properties: {}),
         meta: meta,
       ),
     );

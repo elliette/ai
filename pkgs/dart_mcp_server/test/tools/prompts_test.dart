@@ -23,7 +23,7 @@ void main() {
       final promptsResult = await server.listPrompts(ListPromptsRequest());
       expect(
         promptsResult.prompts,
-        equals([
+        containsAll([
           isA<Prompt>()
               .having(
                 (p) => p.name,

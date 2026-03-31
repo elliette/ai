@@ -46,12 +46,12 @@ final class DartMCPServer extends MCPServer
         DartAnalyzerSupport,
         PubSupport,
         PubDevSupport,
+        ElicitationRequestSupport,
         DartToolingDaemonSupport,
         FlutterLauncherSupport,
         PromptsSupport,
         DashPrompts,
         PackageUriSupport,
-        ElicitationRequestSupport,
         GrepSupport,
         AnalyticsEvents
     implements

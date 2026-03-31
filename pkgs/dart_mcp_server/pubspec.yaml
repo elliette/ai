@@ -38,6 +38,7 @@ dependencies:
   stream_channel: ^2.1.4
   unified_analytics: ^8.0.2
   vm_service: ^15.0.0
+  vm_service_protos: ^2.0.1
   watcher: ^1.1.1
   web_socket: ^1.0.1
   yaml: ^3.1.3
