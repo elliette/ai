@@ -286,84 +286,37 @@ base mixin DartToolingDaemonSupport
     );
   }
 
-  Future<CallToolResult> _recordFrames(CallToolRequest request) async {
-    final uri = request.arguments?['uri'] as String?;
-    if (uri == null) {
-      return CallToolResult(
-        isError: true,
-        content: [TextContent(text: 'Missing required argument "uri".')],
-      );
-    }
-
-    final vmServiceUri = uri;
-    var vmServiceFuture = activeVmServices[vmServiceUri];
+  Future<VmService?> _connectToVmService(String uri) async {
+    var vmServiceFuture = activeVmServices[uri];
     if (activeVmServices.isEmpty || vmServiceFuture == null) {
-      vmServiceFuture = activeVmServices[vmServiceUri] = vmServiceConnectUri(
-        vmServiceUri,
-      );
+      vmServiceFuture = activeVmServices[uri] = vmServiceConnectUri(uri);
     }
 
-    vmServiceFuture = activeVmServices[vmServiceUri];
+    vmServiceFuture = activeVmServices[uri];
     if (vmServiceFuture == null) {
-      return CallToolResult(
-        isError: true,
-        content: [
-          TextContent(
-            text:
-                'No active VM service found for uri: $vmServiceUri. Please make sure the app is running.',
-          ),
-        ],
-      );
+      return null;
     }
 
     final vmService = await vmServiceFuture;
     debugLog('VM service connected: ${vmService.wsUri}');
 
-    // Ensure we are subscribed to the extension stream to receive events.
-    try {
-      await vmService.streamListen(EventStreams.kExtension);
-    } on RPCError catch (e) {
-      if (e.code != RPCErrorKind.kStreamAlreadySubscribed.code) {
-        rethrow;
-      }
-    }
+    return vmService;
+  }
 
-    try {
-      final vm = await vmService.getVM();
-      if (vm.isolates?.isNotEmpty == true) {
-        await vmService.callServiceExtension(
-          'ext.flutter.profileWidgetBuilds',
-          isolateId: vm.isolates!.first.id,
-          args: {'enabled': true},
-        );
-      }
-    } catch (e) {
-      debugLog('Could not enable ext.flutter.profileWidgetBuilds: $e');
-    }
-
+  MetaWithProgressToken? _metaWithProgressToken(CallToolRequest request) {
     final progressToken = request.meta?.progressToken;
-    final meta = progressToken != null
+    return progressToken != null
         ? MetaWithProgressToken(progressToken: progressToken)
         : null;
+  }
 
-    // 2. Wait for user to be ready to record.
-    await elicit(
-      ElicitRequest.form(
-        message:
-            'Ready to record frames. Please prepare your app to reproduce the issue, and submit this form when you are ready to start recording.',
-        requestedSchema: ObjectSchema(properties: {}),
-        meta: meta,
-      ),
-    );
-
-    final currentVmTime = await vmService.getVMTimelineMicros();
-
-    // 3. Start recording Flutter frames.
+  Future<List<Map<String, Object?>>> _captureFramesUntilStopped(
+    VmService vmService,
+    MetaWithProgressToken? meta,
+  ) async {
     final frames = <Map<String, Object?>>[];
     final subscription = vmService.onExtensionEvent.listen((event) {
-      debugLog('VM service event: ${event.extensionKind}');
       if (event.extensionKind == 'Flutter.Frame') {
-        debugLog('Flutter.Frame event: ${event.extensionData?.data}');
         final data = event.extensionData?.data;
         if (data != null) {
           frames.add(data);
@@ -385,74 +338,75 @@ base mixin DartToolingDaemonSupport
       await subscription.cancel();
     }
 
-    final endVmTime = await vmService.getVMTimelineMicros();
+    return frames;
+  }
 
-    double fps = 60.0;
-    try {
-      final vm = await vmService.getVM();
-      final isolateId = vm.isolates?.firstOrNull?.id;
-      if (isolateId != null) {
-        final displayRefreshRate = await vmService.callServiceExtension(
-          '_flutter.getDisplayRefreshRate',
-          isolateId: isolateId,
-        );
-        fps = displayRefreshRate.json?['fps'] as double? ?? 60.0;
-      }
-    } catch (e) {
-      debugLog('Could not get display refresh rate: $e');
-    }
-    debugLog('FPS IS $fps');
+  List<Map<String, Object?>> _filterFrames(
+    List<Map<String, Object?>> frames,
+    double fps,
+  ) {
+    final filtered = <Map<String, Object?>>[];
 
-    final rawPerfettoTimeline = await vmService.getPerfettoVMTimeline(
-      timeOriginMicros: currentVmTime.timestamp!,
-      timeExtentMicros: endVmTime.timestamp! - currentVmTime.timestamp!,
-    );
-
-    final trace = rawPerfettoTimeline.trace;
-    final filteredTrace = Trace.fromBuffer(base64Decode(trace!));
-    final trackEvents = filteredTrace.packet.where(
-      (packet) => packet.hasTrackEvent(),
-    );
-    debugLog('Track events: ${trackEvents.length}');
-    for (final trackEvent in trackEvents) {
-      final event = trackEvent.trackEvent;
-      print(event);
-      final debugAnnotations = event.debugAnnotations;
-
-      print(
-        'TRACK EVENT: ${trackEvent.trackEvent.name} / ${trackEvent.trackEvent.type}',
-      );
-    }
-
-    // debugLog('Raw perfetto timeline: ${rawPerfettoTimeline.toString()}');
-
-    final framesWithJanky = frames.map((frame) {
-      final janky = isJanky(
+    int? lastFrame;
+    for (var i = 0; i < frames.length; i++) {
+      final frame = frames[i];
+      final frameNum = frame['number'] as int;
+      final previousFrame = i - 1 >= 0 ? frames[i - 1] : null;
+      final previousFrameNum = previousFrame?['number'] as int?;
+      final frameIsJanky = isJanky(
         fps,
         rasterTime: Duration(
           microseconds: frame['raster'] as int,
         ).inMilliseconds,
         buildTime: Duration(microseconds: frame['build'] as int).inMilliseconds,
       );
-      return <String, Object?>{...frame, 'isJanky': janky};
-    }).toList();
+      if (frameIsJanky) {
+        if ((lastFrame != previousFrameNum || lastFrame == null) &&
+            previousFrame != null) {
+          filtered.add({...previousFrame, 'isJanky': false});
+        }
 
-    final filteredFramesIndices = <int>{};
-    for (var i = 0; i < framesWithJanky.length; i++) {
-      if (framesWithJanky[i]['isJanky'] == true) {
-        if (i > 0) filteredFramesIndices.add(i - 1);
-        filteredFramesIndices.add(i);
-        if (i < framesWithJanky.length - 1) filteredFramesIndices.add(i + 1);
+        filtered.add({...frame, 'isJanky': true});
+        lastFrame = frameNum;
+      } else if (lastFrame != null && frameNum == lastFrame + 1) {
+        filtered.add({...frame, 'isJanky': false});
       }
     }
 
-    final filteredFramesIndexList = filteredFramesIndices.toList()..sort();
-    // final filteredFrames = filteredFramesIndexList
-    //     .map((i) => framesWithJanky[i])
-    //     .toList();
+    return filtered;
+  }
 
-    final trackEventsByFrame = <int, List<Object?>>{};
-    for (final packet in trackEvents) {
+  Future<double> _calculateFps(VmService vmService, VM vm) async {
+    double? fps;
+    try {
+      final isolateId = vm.isolates?.firstOrNull?.id;
+      if (isolateId != null) {
+        final displayRefreshRate = await vmService.callServiceExtension(
+          '_flutter.getDisplayRefreshRate',
+          isolateId: isolateId,
+        );
+        fps = displayRefreshRate.json?['fps'] as double?;
+      }
+    } catch (e) {
+      debugLog('Could not get display refresh rate: $e');
+    }
+
+    return fps ?? 60.0;
+  }
+
+  Map<String, List<Object?>> _jankyTraceEvents(
+    Set<int> jankyFrameNumbers,
+    PerfettoTimeline rawPerfettoTimeline,
+  ) {
+    final jankyEvents = <String, List<Object?>>{};
+
+    final trace = rawPerfettoTimeline.trace;
+    final filteredTrace = Trace.fromBuffer(base64Decode(trace!));
+    final packetsWithTraceEvents = filteredTrace.packet.where(
+      (packet) => packet.hasTrackEvent(),
+    );
+
+    for (final packet in packetsWithTraceEvents) {
       final event = packet.trackEvent;
       int? frameNumber;
 
@@ -470,34 +424,117 @@ base mixin DartToolingDaemonSupport
         }
       }
 
-      if (frameNumber != null) {
-        trackEventsByFrame
-            .putIfAbsent(frameNumber, () => [])
-            .add(event.toProto3Json());
+      if (frameNumber != null && jankyFrameNumbers.contains(frameNumber)) {
+        final frameKey = frameNumber.toString();
+        jankyEvents.putIfAbsent(frameKey, () => []);
+        jankyEvents[frameKey]!.add(event.toProto3Json());
       }
     }
 
-    final filteredFrames = filteredFramesIndexList.map((i) {
-      final frame = framesWithJanky[i];
-      final frameNumber = frame['number'] as int?;
-      return <String, Object?>{
-        ...frame,
-        'trackEvents': frameNumber != null
-            ? trackEventsByFrame[frameNumber] ?? []
-            : [],
-      };
-    }).toList();
+    return jankyEvents;
+  }
 
-    debugLog('Recorded ${frames.length} frames.');
-    debugLog('Filtered frames: ${filteredFrames.length}');
+  Future<CallToolResult> _recordFrames(CallToolRequest request) async {
+    final uri = request.arguments?['uri'] as String?;
+    if (uri == null) {
+      return CallToolResult(
+        isError: true,
+        content: [TextContent(text: 'Missing required argument "uri".')],
+      );
+    }
+
+    final vmService = await _connectToVmService(uri);
+    if (vmService == null) {
+      return CallToolResult(
+        isError: true,
+        content: [
+          TextContent(
+            text:
+                'No active VM service found for uri: $uri. Please make sure the app is running.',
+          ),
+        ],
+      );
+    }
+
+    try {
+      await vmService.streamListen(EventStreams.kExtension);
+    } on RPCError catch (e) {
+      if (e.code != RPCErrorKind.kStreamAlreadySubscribed.code) {
+        rethrow;
+      }
+    }
+
+    final vm = await vmService.getVM();
+    try {
+      await vmService.callServiceExtension(
+        'ext.flutter.profileWidgetBuilds',
+        isolateId: vm.isolates?.first.id,
+        args: {'enabled': true},
+      );
+    } catch (e) {
+      debugLog('Could not enable ext.flutter.profileWidgetBuilds: $e');
+    }
+
+    await elicit(
+      ElicitRequest.form(
+        message:
+            '''Ready to record frames. Please prepare your app to reproduce the issue,
+            and submit this form when you are ready to start recording.''',
+        requestedSchema: ObjectSchema(properties: {}),
+        meta: _metaWithProgressToken(request),
+      ),
+    );
+
+    final currentVmTime = await vmService.getVMTimelineMicros();
+    final frames = await _captureFramesUntilStopped(
+      vmService,
+      _metaWithProgressToken(request),
+    );
+    final endVmTime = await vmService.getVMTimelineMicros();
+
+    final fps = await _calculateFps(vmService, vm);
+    final filteredFrames = _filterFrames(frames, fps);
+
+    final jankyFrameNumbers = filteredFrames
+        .where((f) => f['isJanky'] == true)
+        .map((f) => f['number'] as int)
+        .toSet();
+
+    debugLog('CURRENT VM TIME: ${currentVmTime.timestamp}');
+    debugLog('END VM TIME: ${endVmTime.timestamp}');
+    debugLog('FILTERED FRAMES: $filteredFrames');
+
+    final rawPerfettoTimeline = await vmService.getPerfettoVMTimeline(
+      timeOriginMicros: currentVmTime.timestamp!,
+      timeExtentMicros: endVmTime.timestamp! - currentVmTime.timestamp!,
+    );
+
+    final jankyTraceEvents = _jankyTraceEvents(
+      jankyFrameNumbers,
+      rawPerfettoTimeline,
+    );
+
+    for (final frame in filteredFrames) {
+      if (frame['isJanky'] == true) {
+        final frameNumber = frame['number'] as int?;
+        if (frameNumber != null) {
+          final events = jankyTraceEvents[frameNumber.toString()];
+          if (events != null) {
+            frame['trace_events'] = events;
+          }
+        }
+      }
+    }
+
 
     return CallToolResult(
       content: [
         TextContent(
           text: jsonEncode({
-            'filtered_frames': filteredFrames,
+            'frame_details': filteredFrames,
             'fps': fps,
             'total_frames_count': frames.length,
+            // 'trace_events': jankyTraceEvents,
           }),
         ),
       ],
